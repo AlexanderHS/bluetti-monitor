@@ -10,10 +10,9 @@ import numpy as np
 import pytesseract
 from io import BytesIO
 from fastapi.responses import Response
-import asyncio
 import aiosqlite
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from datetime import datetime
+from typing import List, Dict
 import json
 import logging
 from pathlib import Path
@@ -144,7 +143,7 @@ def capture_image():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database and start background tasks"""
+    """Initialize database - worker handles background polling"""
     global startup_time
     startup_time = datetime.now().timestamp()
     
@@ -153,16 +152,12 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await db.init_db()
     logger.info("Database initialized")
-    
-    # Start background polling task
-    task = asyncio.create_task(background_polling_task())
-    logger.info("Background polling task started")
+    logger.info("Background polling is handled by separate worker service")
     
     yield
     
     # Cleanup on shutdown
-    logger.info("Shutting down...")
-    task.cancel()
+    logger.info("Shutting down API service...")
 
 app = FastAPI(
     title=os.getenv("API_TITLE", "Bluetti Monitor API"),
@@ -1022,132 +1017,7 @@ async def capture_ocr_advanced():
     except Exception as e:
         return {"error": f"Advanced OCR failed: {str(e)}"}
 
-# Background polling task
-async def background_polling_task():
-    """Background task that periodically captures and stores battery readings"""
-    polling_interval = int(os.getenv("POLLING_INTERVAL_SECONDS", 60))
-    confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 0.6))
-    
-    logger.info(f"Starting background polling: interval={polling_interval}s, min_confidence={confidence_threshold}")
-    
-    while True:
-        try:
-            # Use the advanced OCR endpoint logic directly
-            test_image = capture_image()
-            screen_analysis = analyze_screen_state(test_image)
-            
-            if screen_analysis.get("screen_state") == "off":
-                logger.debug("Screen is off, skipping OCR polling")
-                await asyncio.sleep(polling_interval)
-                continue
-            
-            # Get advanced OCR result (simplified version of the endpoint)
-            thresholds = [145, 150, 155, 160, 165, 170]
-            psm_modes = [6, 7, 8, 13]
-            num_captures = 3
-            
-            all_results = []
-            
-            for capture_num in range(num_captures):
-                try:
-                    image_bytes = capture_image()
-                    nparr = np.frombuffer(image_bytes, np.uint8)
-                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    
-                    if img is None:
-                        continue
-                    
-                    coords = get_crop_coordinates()
-                    cropped = img[coords['y1']:coords['y2'], coords['x1']:coords['x2']]
-                    flipped = cv2.flip(cropped, 1)
-                    gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
-                    height, width = gray.shape
-                    upscaled = cv2.resize(gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC)
-                    
-                    for threshold in thresholds:
-                        _, binary = cv2.threshold(upscaled, threshold, 255, cv2.THRESH_BINARY_INV)
-                        
-                        for psm_mode in psm_modes:
-                            try:
-                                config = f'--oem 3 --psm {psm_mode} -c tessedit_char_whitelist=0123456789%'
-                                raw_text = pytesseract.image_to_string(binary, config=config).strip()
-                                
-                                if raw_text:
-                                    digits_only = ''.join(c for c in raw_text if c.isdigit())
-                                    
-                                    if digits_only:
-                                        if len(digits_only) == 4 and digits_only.startswith("100"):
-                                            percentage_candidate = 100
-                                        elif len(digits_only) == 3:
-                                            percentage_candidate = int(digits_only[:2])
-                                        elif len(digits_only) in [1, 2]:
-                                            percentage_candidate = int(digits_only)
-                                        else:
-                                            continue
-                                        
-                                        if 0 <= percentage_candidate <= 100:
-                                            all_results.append(percentage_candidate)
-                            except:
-                                continue
-                except:
-                    continue
-            
-            # Process results with voting
-            if all_results:
-                from collections import Counter
-                vote_counts = Counter(all_results)
-                most_common = vote_counts.most_common()
-                winner = most_common[0]
-                
-                confidence = winner[1] / len(all_results)
-                
-                if confidence >= confidence_threshold:
-                    # Check plausibility against last reading
-                    should_store = True
-                    plausibility_msg = ""
-                    
-                    try:
-                        last_readings = await db.get_recent_readings(limit=1)
-                        if last_readings:
-                            last_reading = last_readings[0]
-                            time_diff_minutes = (datetime.now().timestamp() - last_reading["timestamp"]) / 60
-                            percentage_diff = abs(winner[0] - last_reading["battery_percentage"])
-                            
-                            # Plausibility thresholds (more lenient for longer time gaps)
-                            if time_diff_minutes < 2 and percentage_diff > 8:
-                                # Very implausible - require very high confidence
-                                if confidence < 0.9:
-                                    should_store = False
-                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {winner[0]}% in {time_diff_minutes:.1f}min (conf: {confidence})"
-                            elif time_diff_minutes < 5 and percentage_diff > 15:
-                                # Somewhat implausible - require higher confidence
-                                if confidence < 0.85:
-                                    should_store = False  
-                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {winner[0]}% in {time_diff_minutes:.1f}min (conf: {confidence})"
-                    except:
-                        # If we can't check plausibility, proceed normally
-                        pass
-                    
-                    if should_store:
-                        # Store in database
-                        await db.insert_reading(
-                            battery_percentage=winner[0],
-                            confidence=confidence,
-                            ocr_method="background_advanced",
-                            total_attempts=len(all_results),
-                            raw_vote_data=dict(vote_counts)
-                        )
-                    else:
-                        logger.debug(f"Plausibility check failed: {plausibility_msg}")
-                else:
-                    logger.debug(f"Low confidence reading skipped: {winner[0]}% (confidence: {confidence})")
-            else:
-                logger.debug("No valid OCR results in background polling")
-                
-        except Exception as e:
-            logger.error(f"Background polling error: {e}")
-        
-        await asyncio.sleep(polling_interval)
+# Background polling is now handled by the separate worker service
 
 def analyze_screen_state(image_bytes):
     """
