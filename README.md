@@ -50,6 +50,29 @@ ESP32 Webcam → Bluetti Monitor Agent → FastAPI → Home Automation System
 ## Development
 
 ### Local Setup
+
+**Option 1: Using UV (Recommended)**
+```bash
+# Clone and setup
+git clone https://github.com/AlexanderHS/bluetti-monitor.git
+cd bluetti-monitor
+
+# Create a new venv with Python 3.12
+uv venv --python 3.12
+source .venv/bin/activate
+
+# Install dependencies
+uv pip install -r requirements.txt
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your ESP32 webcam IP
+
+# Run development server  
+python main.py
+```
+
+**Option 2: Using pip**
 ```bash
 # Clone and setup
 git clone https://github.com/AlexanderHS/bluetti-monitor.git
