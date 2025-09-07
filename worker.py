@@ -405,7 +405,7 @@ async def get_recommendations_and_control():
     """
     Fetch recommendations from the API and control devices accordingly
     """
-    api_host = os.getenv("API_HOST", "localhost")
+    api_host = os.getenv("API_HOST", "bluetti-monitor-api")
     api_port = os.getenv("API_PORT", "8000")
     recommendations_url = f"http://{api_host}:{api_port}/recommendations"
     
