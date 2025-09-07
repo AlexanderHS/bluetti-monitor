@@ -541,6 +541,163 @@ async def control_devices_based_on_battery(battery_percentage: int):
         logger.warning(f"Only {success_count}/{total_devices} devices controlled successfully")
         return False
 
+"""
+Shared SwitchBot controller for Bluetti screen management
+
+This module handles SwitchBot operations including device initialization,
+rate limiting, and screen tapping functionality.
+"""
+import os
+import time
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+try:
+    from switchbot import SwitchBot
+    SWITCHBOT_AVAILABLE = True
+except ImportError:
+    logger.warning("python-switchbot not installed - SwitchBot functionality disabled")
+    SWITCHBOT_AVAILABLE = False
+
+
+class SwitchBotController:
+    """Handle SwitchBot operations for screen control with rate limiting"""
+    
+    def __init__(self):
+        self.token = os.getenv("SWITCH_BOT_TOKEN")
+        self.secret = os.getenv("SWITCH_BOT_SECRET")
+        self.switchbot = None
+        self.bot_device = None
+        self._initialized = False
+        self.last_tap_time = 0  # Track last tap timestamp
+        self.min_tap_interval = 15 * 60  # 15 minutes in seconds
+        
+    async def initialize(self) -> bool:
+        """Initialize SwitchBot connection and find the bot device"""
+        if self._initialized:
+            return True
+            
+        if not SWITCHBOT_AVAILABLE:
+            logger.warning("python-switchbot package not available")
+            return False
+            
+        if not self.token or not self.secret:
+            logger.warning("SWITCH_BOT_TOKEN or SWITCH_BOT_SECRET not configured - screen tapping disabled")
+            return False
+            
+        try:
+            self.switchbot = SwitchBot(token=self.token, secret=self.secret)
+            devices = self.switchbot.devices()
+            
+            # Find the first bot device (since user mentioned they have only one)
+            for device in devices:
+                if hasattr(device, 'press') or 'Bot' in str(type(device)):
+                    self.bot_device = device
+                    logger.info(f"Found SwitchBot device: {device}")
+                    break
+                    
+            if not self.bot_device:
+                logger.warning("No SwitchBot Bot device found")
+                return False
+                
+            self._initialized = True
+            logger.info("SwitchBot controller initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize SwitchBot: {e}")
+            return False
+    
+    def get_time_until_next_tap(self) -> float:
+        """Get time in seconds until next tap is allowed"""
+        current_time = time.time()
+        time_since_last_tap = current_time - self.last_tap_time
+        return max(0, self.min_tap_interval - time_since_last_tap)
+    
+    def can_tap_screen(self) -> bool:
+        """Check if enough time has passed since last tap (15 minute minimum)"""
+        return self.get_time_until_next_tap() == 0
+    
+    async def tap_screen(self, force: bool = False) -> dict:
+        """
+        Tap the screen using SwitchBot to turn it on
+        
+        Args:
+            force: If True, bypass rate limiting (use with caution)
+            
+        Returns:
+            Dictionary with success status and details
+        """
+        if not await self.initialize():
+            return {
+                "success": False,
+                "error": "SwitchBot not initialized",
+                "details": "Check token/secret configuration or device availability"
+            }
+            
+        if not force and not self.can_tap_screen():
+            time_remaining = self.get_time_until_next_tap()
+            minutes_remaining = time_remaining / 60
+            return {
+                "success": False,
+                "error": "Rate limited",
+                "details": f"Next tap allowed in {minutes_remaining:.1f} minutes",
+                "time_until_next_tap_seconds": time_remaining
+            }
+            
+        try:
+            logger.info(f"Tapping screen with SwitchBot{'(FORCED)' if force else ''}...")
+            self.bot_device.press()
+            self.last_tap_time = time.time()  # Record the tap time
+            
+            next_tap_time = time.time() + self.min_tap_interval
+            logger.info(f"Screen tap completed - next tap allowed at {time.strftime('%H:%M:%S', time.localtime(next_tap_time))}")
+            
+            return {
+                "success": True,
+                "message": "Screen tapped successfully",
+                "tap_time": self.last_tap_time,
+                "next_tap_allowed_at": next_tap_time,
+                "forced": force
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to tap screen with SwitchBot: {e}")
+            return {
+                "success": False,
+                "error": "Tap failed",
+                "details": str(e)
+            }
+    
+    async def get_status(self) -> dict:
+        """Get SwitchBot controller status"""
+        if not await self.initialize():
+            return {
+                "initialized": False,
+                "device_found": False,
+                "can_tap": False,
+                "error": "Not initialized"
+            }
+        
+        time_until_next = self.get_time_until_next_tap()
+        
+        return {
+            "initialized": True,
+            "device_found": self.bot_device is not None,
+            "device_info": str(self.bot_device) if self.bot_device else None,
+            "can_tap": time_until_next == 0,
+            "time_until_next_tap_seconds": time_until_next,
+            "time_until_next_tap_minutes": round(time_until_next / 60, 1),
+            "last_tap_time": self.last_tap_time if self.last_tap_time > 0 else None,
+            "rate_limit_minutes": self.min_tap_interval / 60
+        }
+
+
+# Global instance for shared use
+switchbot_controller = SwitchBotController()
+
 async def background_worker():
     """Main worker loop that performs background polling with parallelized OCR"""
     # Initialize database
@@ -549,9 +706,13 @@ async def background_worker():
     
     # Configuration
     polling_interval = int(os.getenv("POLLING_INTERVAL_SECONDS", 60))
-    confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 0.5))  # Lower threshold
+    confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 0.5))
+    screen_tap_enabled = os.getenv("SCREEN_TAP_ENABLED", "true").lower() == "true"
     
-    logger.info(f"Worker starting: interval={polling_interval}s, min_confidence={confidence_threshold}, processes={mp.cpu_count()}")
+    logger.info(f"Worker starting: interval={polling_interval}s, min_confidence={confidence_threshold}, screen_tap={screen_tap_enabled}")
+    
+    consecutive_screen_off_count = 0
+    max_screen_off_before_tap = 2  # Tap after 2 consecutive "screen off" detections
     
     while True:
         try:
@@ -560,10 +721,49 @@ async def background_worker():
             screen_analysis = analyze_screen_state(test_image)
             
             if screen_analysis.get("screen_state") == "off":
-                logger.debug("Screen is off, skipping OCR polling")
-                await asyncio.sleep(polling_interval)
-                continue
-            
+                consecutive_screen_off_count += 1
+                logger.debug(f"Screen is off (count: {consecutive_screen_off_count})")
+                
+                # If screen has been off for multiple cycles and tapping is enabled, try to turn it on
+                if (screen_tap_enabled and 
+                    consecutive_screen_off_count >= max_screen_off_before_tap and
+                    switchbot_controller.can_tap_screen()):  # Check rate limit
+                    
+                    logger.info(f"Screen has been off for {consecutive_screen_off_count} cycles, attempting to tap it on")
+                    
+                    if await switchbot_controller.tap_screen():
+                        # Reset counter since we just tapped
+                        consecutive_screen_off_count = 0
+                        
+                        # Wait a moment for screen to turn on, then retry
+                        await asyncio.sleep(3)
+                        
+                        # Re-check screen state after tapping
+                        test_image = capture_image()
+                        screen_analysis = analyze_screen_state(test_image)
+                        
+                        if screen_analysis.get("screen_state") == "on":
+                            logger.info("Successfully turned screen on with SwitchBot tap!")
+                            # Continue with OCR processing below
+                        else:
+                            logger.warning("Screen tap didn't turn screen on, will retry next cycle")
+                            await asyncio.sleep(polling_interval)
+                            continue
+                    else:
+                        logger.debug("Cannot tap screen (rate limited or failed), skipping OCR polling")
+                        await asyncio.sleep(polling_interval)
+                        continue
+                else:
+                    # Screen is off but we haven't reached the tap threshold yet, or rate limited
+                    if screen_tap_enabled and consecutive_screen_off_count >= max_screen_off_before_tap:
+                        logger.debug("Screen tap rate limited - waiting for next allowed tap window")
+                    await asyncio.sleep(polling_interval)
+                    continue
+            else:
+                # Screen is on, reset the counter
+                consecutive_screen_off_count = 0
+                
+            # If we get here, screen should be on - proceed with OCR
             # Perform parallelized OCR analysis
             start_time = time.time()
             ocr_result = await parallel_ocr_analysis(test_image, num_captures=3)

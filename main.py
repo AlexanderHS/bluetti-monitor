@@ -17,6 +17,7 @@ import json
 import logging
 from pathlib import Path
 from recommendations import analyze_recent_readings_for_recommendations
+from switchbot_controller import switchbot_controller
 
 load_dotenv()
 
@@ -1122,6 +1123,38 @@ async def capture_and_analyze():
         "capture_url": capture_url,
         "attempts": max_retries
     }
+
+@app.get("/switchbot/status")
+async def get_switchbot_status():
+    """Get SwitchBot controller status and rate limiting info"""
+    try:
+        status = await switchbot_controller.get_status()
+        return {
+            "success": True,
+            **status
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to get SwitchBot status: {str(e)}"
+        }
+
+@app.post("/switchbot/tap")
+async def tap_screen_manual(force: bool = False):
+    """
+    Manually tap the screen using SwitchBot
+    
+    Args:
+        force: If True, bypass 15-minute rate limiting (use with caution)
+    """
+    try:
+        result = await switchbot_controller.tap_screen(force=force)
+        return result
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to tap screen: {str(e)}"
+        }
 
 if __name__ == "__main__":
     host = os.getenv("API_HOST", "0.0.0.0")
