@@ -362,6 +362,95 @@ async def parallel_ocr_analysis(image_bytes: bytes, num_captures: int = 3) -> Di
             "parallelization_used": True
         }
 
+async def control_device(device_name: str, turn_on: bool):
+    """
+    Control a device via the device control API
+    
+    Args:
+        device_name: Name of the device (e.g., "input", "output_1", "output_2")
+        turn_on: True to turn on, False to turn off
+    """
+    control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
+    control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
+    control_url = f"http://{control_api_host}:{control_api_port}/device/control"
+    
+    payload = {
+        "device_name": device_name,
+        "turn_on": turn_on
+    }
+    
+    try:
+        response = requests.post(
+            control_url,
+            json=payload,
+            headers={
+                "accept": "application/json",
+                "Content-Type": "application/json"
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"Successfully controlled device {device_name}: {'on' if turn_on else 'off'}")
+            return True
+        else:
+            logger.error(f"Failed to control device {device_name}: HTTP {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error controlling device {device_name}: {e}")
+        return False
+
+async def get_recommendations_and_control():
+    """
+    Fetch recommendations from the API and control devices accordingly
+    """
+    api_host = os.getenv("API_HOST", "localhost")
+    api_port = os.getenv("API_PORT", "8000")
+    recommendations_url = f"http://{api_host}:{api_port}/recommendations"
+    
+    try:
+        response = requests.get(recommendations_url, timeout=10)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to get recommendations: HTTP {response.status_code}")
+            return False
+            
+        recommendations_data = response.json()
+        
+        if not recommendations_data.get("success"):
+            logger.warning(f"Recommendations API returned error: {recommendations_data.get('message', 'Unknown error')}")
+            return False
+            
+        recommendations = recommendations_data.get("recommendations", {})
+        reasoning = recommendations_data.get("reasoning", "")
+        
+        logger.info(f"Recommendations received: {reasoning}")
+        
+        # Control each device based on recommendations
+        success_count = 0
+        total_devices = 0
+        
+        for device_name, action in recommendations.items():
+            total_devices += 1
+            turn_on = action == "turn_on"
+            
+            if await control_device(device_name, turn_on):
+                success_count += 1
+            else:
+                logger.error(f"Failed to control {device_name}")
+        
+        if success_count == total_devices:
+            logger.info(f"Successfully controlled all {total_devices} devices")
+            return True
+        else:
+            logger.warning(f"Only {success_count}/{total_devices} devices controlled successfully")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error getting recommendations and controlling devices: {e}")
+        return False
+
 async def background_worker():
     """Main worker loop that performs background polling with parallelized OCR"""
     # Initialize database
@@ -428,6 +517,10 @@ async def background_worker():
                             raw_vote_data=ocr_result["vote_distribution"]
                         )
                         logger.info(f"Stored reading: {battery_percentage}% (conf: {confidence}, time: {processing_time:.2f}s)")
+                        
+                        # NEW: Get recommendations and control devices
+                        await get_recommendations_and_control()
+                        
                     else:
                         logger.debug(f"Plausibility check failed: {plausibility_msg}")
                 else:
