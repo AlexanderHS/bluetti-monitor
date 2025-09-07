@@ -24,6 +24,9 @@ load_dotenv()
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")))
 logger = logging.getLogger(__name__)
 
+# Add a global variable to track startup time
+startup_time = None
+
 # Database management
 class BatteryDatabase:
     def __init__(self, db_path: str):
@@ -142,6 +145,9 @@ def capture_image():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database and start background tasks"""
+    global startup_time
+    startup_time = datetime.now().timestamp()
+    
     logger.info("Starting up Bluetti Monitor API")
     
     # Initialize database
@@ -167,7 +173,55 @@ app = FastAPI(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "message": "Bluetti Monitor is running"}
+    """Health check endpoint that verifies the monitoring system is working"""
+    try:
+        # Get the most recent reading
+        recent_readings = await db.get_recent_readings(limit=1)
+        
+        # Check if we have any readings and if the most recent one is within 30 minutes
+        thirty_minutes_ago = datetime.now().timestamp() - (30 * 60)
+        
+        if recent_readings and recent_readings[0]["timestamp"] >= thirty_minutes_ago:
+            # We have a recent reading - healthy
+            last_reading = recent_readings[0]
+            return {
+                "status": "healthy", 
+                "message": "Bluetti Monitor is running and collecting data",
+                "last_reading_age_minutes": round((datetime.now().timestamp() - last_reading["timestamp"]) / 60, 1),
+                "battery_percentage": last_reading["battery_percentage"]
+            }
+        
+        # No recent readings - check uptime
+        if startup_time:
+            uptime_minutes = (datetime.now().timestamp() - startup_time) / 60
+            
+            if uptime_minutes > 30:
+                # We've been running for more than 30 minutes with no data - unhealthy
+                return {
+                    "status": "unhealthy",
+                    "message": f"No battery readings in last 30 minutes (uptime: {uptime_minutes:.1f} minutes)",
+                    "uptime_minutes": round(uptime_minutes, 1)
+                }
+            else:
+                # We haven't been running long enough to expect data yet - healthy but no data
+                return {
+                    "status": "healthy",
+                    "message": f"Bluetti Monitor is running but no data yet (uptime: {uptime_minutes:.1f} minutes)",
+                    "uptime_minutes": round(uptime_minutes, 1)
+                }
+        else:
+            # Startup time not available - assume healthy for now
+            return {
+                "status": "healthy",
+                "message": "Bluetti Monitor is running (startup time not available)"
+            }
+            
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "message": f"Health check failed: {str(e)}",
+            "error": str(e)
+        }
 
 @app.get("/status")
 async def get_battery_status():
@@ -245,6 +299,97 @@ async def get_battery_history(limit: int = 20):
         return {
             "success": False,
             "error": f"Failed to get battery history: {str(e)}"
+        }
+
+@app.get("/recommendations")
+async def get_power_recommendations():
+    """Get power management recommendations based on recent battery status"""
+    try:
+        # Get readings from the last 30 minutes
+        thirty_minutes_ago = datetime.now().timestamp() - (30 * 60)
+        
+        # Get recent readings and filter to last 30 minutes
+        recent_readings = await db.get_recent_readings(limit=100)  # Get more to ensure we have enough
+        readings_last_30min = [
+            reading for reading in recent_readings 
+            if reading["timestamp"] >= thirty_minutes_ago
+        ]
+        
+        # Case 1: No readings in the last 30 minutes - we're blind
+        if not readings_last_30min:
+            return {
+                "success": True,
+                "status": "blind",
+                "message": "No recent readings in the last 30 minutes",
+                "recommendations": {
+                    "input": "turn_off",
+                    "output_1": "turn_off", 
+                    "output_2": "turn_off"
+                },
+                "reasoning": "No recent battery data available - turning off all outputs and input for safety",
+                "last_reading_age_minutes": None,
+                "battery_percentage": None
+            }
+        
+        # Case 2: We have recent readings - analyze battery percentage
+        latest_reading = readings_last_30min[0]  # Most recent reading
+        battery_percentage = latest_reading["battery_percentage"]
+        last_reading_age_minutes = (datetime.now().timestamp() - latest_reading["timestamp"]) / 60
+        
+        # Determine recommendations based on battery percentage
+        if battery_percentage < 20:
+            # Below 20% - turn off outputs, turn on input (charge)
+            recommendations = {
+                "input": "turn_on",
+                "output_1": "turn_off",
+                "output_2": "turn_off"
+            }
+            reasoning = f"Battery at {battery_percentage}% - critical low, charging needed"
+            
+        elif 20 <= battery_percentage < 60:
+            # Between 20-60% - turn off input, turn off outputs (conservation)
+            recommendations = {
+                "input": "turn_off",
+                "output_1": "turn_off", 
+                "output_2": "turn_off"
+            }
+            reasoning = f"Battery at {battery_percentage}% - low, conserving power"
+            
+        elif 60 <= battery_percentage < 80:
+            # Between 60-80% - turn off input, turn on one output (moderate drain)
+            recommendations = {
+                "input": "turn_off",
+                "output_1": "turn_on",
+                "output_2": "turn_off"
+            }
+            reasoning = f"Battery at {battery_percentage}% - moderate level, using one output for moderate drain"
+            
+        else:  # battery_percentage >= 80
+            # Above 80% - turn off input, turn on both outputs (rapid drain)
+            recommendations = {
+                "input": "turn_off",
+                "output_1": "turn_on",
+                "output_2": "turn_on"
+            }
+            reasoning = f"Battery at {battery_percentage}% - high level, using both outputs for rapid drain"
+        
+        return {
+            "success": True,
+            "status": "active",
+            "message": "Recommendations based on recent battery status",
+            "recommendations": recommendations,
+            "reasoning": reasoning,
+            "battery_percentage": battery_percentage,
+            "last_reading_age_minutes": round(last_reading_age_minutes, 1),
+            "readings_in_last_30min": len(readings_last_30min),
+            "confidence": latest_reading.get("confidence", None),
+            "last_reading_timestamp": latest_reading["timestamp"]
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to generate recommendations: {str(e)}"
         }
 
 @app.get("/camera/status")
