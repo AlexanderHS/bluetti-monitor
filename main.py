@@ -69,7 +69,7 @@ class BatteryDatabase:
                 json.dumps(raw_vote_data) if raw_vote_data else None
             ))
             await db.commit()
-            logger.info(f"Stored battery reading: {battery_percentage}% (confidence: {confidence})")
+            logger.info(f"Stored battery reading: {battery_percentage}% (confidence: {confidence}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     async def get_recent_readings(self, limit: int = 10) -> List[Dict]:
         """Get recent battery readings"""
@@ -115,7 +115,7 @@ def capture_image():
     
     capture_url = urljoin(webcam_url, capture_endpoint)
     
-    # Retry logic for network issues
+    # Retry logic for network issues including "premature end of data segment"
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -123,6 +123,15 @@ def capture_image():
             if response.status_code == 200:
                 return response.content
         except Exception as e:
+            error_msg = str(e).lower()
+            # Check for specific recoverable errors
+            if "premature end of data segment" in error_msg or "connection" in error_msg or "timeout" in error_msg:
+                if attempt < max_retries - 1:
+                    logger.debug(f"Recoverable network error on attempt {attempt + 1}: {e}")
+                    import time
+                    time.sleep(1)  # Wait a bit longer for network issues
+                    continue
+            
             if attempt == max_retries - 1:
                 raise e
             import time
@@ -948,14 +957,43 @@ async def background_polling_task():
                 confidence = winner[1] / len(all_results)
                 
                 if confidence >= confidence_threshold:
-                    # Store in database
-                    await db.insert_reading(
-                        battery_percentage=winner[0],
-                        confidence=confidence,
-                        ocr_method="background_advanced",
-                        total_attempts=len(all_results),
-                        raw_vote_data=dict(vote_counts)
-                    )
+                    # Check plausibility against last reading
+                    should_store = True
+                    plausibility_msg = ""
+                    
+                    try:
+                        last_readings = await db.get_recent_readings(limit=1)
+                        if last_readings:
+                            last_reading = last_readings[0]
+                            time_diff_minutes = (datetime.now().timestamp() - last_reading["timestamp"]) / 60
+                            percentage_diff = abs(winner[0] - last_reading["battery_percentage"])
+                            
+                            # Plausibility thresholds (more lenient for longer time gaps)
+                            if time_diff_minutes < 2 and percentage_diff > 8:
+                                # Very implausible - require very high confidence
+                                if confidence < 0.9:
+                                    should_store = False
+                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {winner[0]}% in {time_diff_minutes:.1f}min (conf: {confidence})"
+                            elif time_diff_minutes < 5 and percentage_diff > 15:
+                                # Somewhat implausible - require higher confidence
+                                if confidence < 0.85:
+                                    should_store = False  
+                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {winner[0]}% in {time_diff_minutes:.1f}min (conf: {confidence})"
+                    except:
+                        # If we can't check plausibility, proceed normally
+                        pass
+                    
+                    if should_store:
+                        # Store in database
+                        await db.insert_reading(
+                            battery_percentage=winner[0],
+                            confidence=confidence,
+                            ocr_method="background_advanced",
+                            total_attempts=len(all_results),
+                            raw_vote_data=dict(vote_counts)
+                        )
+                    else:
+                        logger.debug(f"Plausibility check failed: {plausibility_msg}")
                 else:
                     logger.debug(f"Low confidence reading skipped: {winner[0]}% (confidence: {confidence})")
             else:
