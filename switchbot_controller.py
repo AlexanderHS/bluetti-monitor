@@ -8,6 +8,7 @@ rate limiting, and screen tapping functionality.
 import os
 import time
 import logging
+import asyncio
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,43 @@ class SwitchBotController:
         except Exception as e:
             logger.error(f"Failed to initialize SwitchBot: {e}")
             return False
+    
+    def cleanup_connection(self):
+        """Clean up SwitchBot connection and reset state"""
+        logger.info("Cleaning up SwitchBot connection...")
+        
+        # Close any existing connections if the library supports it
+        if hasattr(self.switchbot, 'close'):
+            try:
+                self.switchbot.close()
+            except:
+                pass
+        
+        # Reset all connection state
+        self.switchbot = None
+        self.bot_device = None
+        self._initialized = False
+        
+        logger.info("SwitchBot connection cleanup complete")
+    
+    async def reinitialize_connection(self):
+        """Force reinitialize the SwitchBot connection (useful for auth errors)"""
+        logger.info("🔄 Force reinitializing SwitchBot connection...")
+        
+        # Clean up existing connection
+        self.cleanup_connection()
+        
+        # Wait a moment before reconnecting
+        await asyncio.sleep(2)
+        
+        # Try to reinitialize
+        success = await self.initialize()
+        if success:
+            logger.info("✅ SwitchBot connection reinitialized successfully")
+        else:
+            logger.error("❌ SwitchBot reinitialization failed")
+        
+        return success
 
     def get_time_until_next_tap(self) -> float:
         """Get time in seconds until next tap is allowed"""

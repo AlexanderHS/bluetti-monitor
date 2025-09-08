@@ -724,6 +724,8 @@ async def background_worker():
     
     consecutive_screen_off_count = 0
     max_screen_off_before_tap = 2  # Tap after 2 consecutive "screen off" detections
+    consecutive_switchbot_failures = 0
+    max_switchbot_failures_before_bypass = 5  # Bypass screen tapping after 5 consecutive failures
     
     while True:
         try:
@@ -737,15 +739,23 @@ async def background_worker():
                 consecutive_screen_off_count += 1
                 logger.debug(f"Screen is off (count: {consecutive_screen_off_count})")
                 
+                # Check if we should bypass SwitchBot due to consecutive failures
+                if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
+                    logger.warning(f"🚨 SwitchBot bypass mode activated - {consecutive_switchbot_failures} consecutive failures, attempting OCR anyway")
+                    # Continue to OCR even though screen appears off
+                    consecutive_screen_off_count = 0  # Reset to prevent further tap attempts
+                    
                 # If screen has been off for multiple cycles and tapping is enabled, try to turn it on
-                if (screen_tap_enabled and 
+                elif (screen_tap_enabled and 
                     consecutive_screen_off_count >= max_screen_off_before_tap and
                     switchbot_controller.can_tap_screen()):  # Check rate limit
                     
                     logger.info(f"Screen has been off for {consecutive_screen_off_count} cycles, attempting to tap it on")
                     
-                    if await switchbot_controller.tap_screen():
-                        # Reset counter since we just tapped
+                    tap_result = await switchbot_controller.tap_screen()
+                    if tap_result.get("success"):
+                        # Reset failure counter on successful tap
+                        consecutive_switchbot_failures = 0
                         consecutive_screen_off_count = 0
                         
                         # Wait a moment for screen to turn on, then retry
@@ -762,7 +772,19 @@ async def background_worker():
                             logger.warning("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
                             should_skip_ocr = True
                     else:
-                        logger.debug("Cannot tap screen (rate limited or failed), skipping OCR polling")
+                        # SwitchBot tap failed - increment failure counter
+                        consecutive_switchbot_failures += 1
+                        error_msg = tap_result.get('error', 'Unknown error')
+                        logger.error(f"SwitchBot tap failed ({consecutive_switchbot_failures}/{max_switchbot_failures_before_bypass}): {error_msg}")
+                        
+                        # Check if it's an authentication error (401) and try to reinitialize
+                        if "401" in str(error_msg) or "Unauthorized" in str(error_msg):
+                            logger.warning("🔄 SwitchBot 401 error detected - attempting to reinitialize connection...")
+                            await switchbot_controller.reinitialize_connection()
+                        
+                        if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
+                            logger.error(f"🚨 SwitchBot failure threshold reached - will bypass screen tapping on next cycle")
+                        
                         should_skip_ocr = True
                 else:
                     # Screen is off but we haven't reached the tap threshold yet, or rate limited
