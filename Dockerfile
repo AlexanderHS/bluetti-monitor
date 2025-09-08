@@ -2,11 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Set timezone to Melbourne, Australia
+ENV TZ=Australia/Melbourne
 RUN apt-get update && apt-get install -y \
     curl \
     libglib2.0-0 \
     tesseract-ocr \
     tesseract-ocr-eng \
+    tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 # Install UV for faster dependency management

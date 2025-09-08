@@ -17,6 +17,14 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
+# Configure logging with ISO 8601 timestamps if not already configured
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%dT%H:%M:%S'
+    )
+
 logger = logging.getLogger(__name__)
 
 class GeminiOCR:

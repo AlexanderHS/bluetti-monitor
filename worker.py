@@ -27,8 +27,12 @@ from switchbot_controller import switchbot_controller
 
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")))
+# Configure logging with ISO 8601 timestamps
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%dT%H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # Database management (same as main.py)
