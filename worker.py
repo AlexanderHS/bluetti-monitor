@@ -737,7 +737,7 @@ async def background_worker():
     logger.info(f"SwitchBot resilience configuration:")
     logger.info(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
     logger.info(f"  - Emergency bypass after: {max_switchbot_failures_before_bypass} consecutive failures")
-    logger.info(f"  - Object recreation interval: 30 minutes")
+    logger.info(f"  - Fresh object creation: Every tap creates new SwitchBot API object")
     
     while True:
         try:
