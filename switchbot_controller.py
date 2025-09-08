@@ -31,9 +31,16 @@ class SwitchBotController:
         self.bot_device = None
         self._initialized = False
         self.last_tap_time = 0  # Track last tap timestamp
-        self.min_tap_interval = os.getenv(
+        self.min_tap_interval = int(os.getenv(
             "SWITCH_BOT_SECONDS_BETWEEN_TAPS", 15 * 60
-        )  # 15 minutes in seconds
+        ))  # Convert to int - seconds between taps
+        
+        # Log configuration at startup
+        logger.info(f"SwitchBot controller initialized:")
+        logger.info(f"  - Token configured: {'✅' if self.token else '❌'}")
+        logger.info(f"  - Secret configured: {'✅' if self.secret else '❌'}")
+        logger.info(f"  - Min tap interval: {self.min_tap_interval} seconds ({self.min_tap_interval/60:.1f} minutes)")
+        logger.info(f"  - Rate limiting: {'✅' if self.min_tap_interval > 0 else '❌ DISABLED'}")
 
     async def initialize(self) -> bool:
         """Initialize SwitchBot connection and find the bot device"""
