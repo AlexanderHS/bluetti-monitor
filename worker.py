@@ -259,48 +259,99 @@ def process_single_ocr_task(args: Tuple) -> Optional[int]:
         # Log errors in the main process, not here to avoid multiprocessing issues
         return None
 
-async def gemini_ocr_analysis() -> Dict:
+async def gemini_ocr_analysis_with_voting() -> Dict:
     """
-    Perform OCR analysis using Gemini vision model via /capture/flip endpoint
+    Perform OCR analysis using Gemini vision model with 3-capture majority voting
     
     Returns:
-        Dictionary with OCR results and metadata
+        Dictionary with OCR results and real confidence based on agreement
     """
     try:
-        # Use the API endpoint that the user confirmed works well with Gemini
+        # Use the API endpoint that sends raw flipped images (no thresholding)
         api_host = os.getenv("API_HOST", "localhost")
         api_port = os.getenv("API_PORT", "8000")
         base_url = f"http://{api_host}:{api_port}"
         
-        start_time = time.time()
-        result = gemini_ocr.get_battery_percentage_from_endpoint(f"{base_url}/capture/flip")
-        processing_time = time.time() - start_time
+        results = []
+        total_processing_time = 0
         
-        if result["success"]:
-            return {
-                "success": True,
-                "battery_percentage": result["percentage"],
-                "confidence": 1.0,  # Gemini is highly reliable
-                "total_attempts": 1,
-                "processing_time": round(processing_time, 2),
-                "method": "gemini_vision",
-                "raw_response": result.get("raw_response"),
-                "gemini_processing_time": result.get("processing_time")
-            }
-        else:
+        # Take 3 captures for majority voting
+        for attempt in range(3):
+            try:
+                start_time = time.time()
+                result = gemini_ocr.get_battery_percentage_from_endpoint(f"{base_url}/capture/flip")
+                processing_time = time.time() - start_time
+                total_processing_time += processing_time
+                
+                if result["success"]:
+                    results.append({
+                        "percentage": result["percentage"],
+                        "processing_time": result.get("processing_time", 0),
+                        "raw_response": result.get("raw_response")
+                    })
+                else:
+                    logger.warning(f"Gemini OCR attempt {attempt + 1} failed: {result['error']}")
+                
+                # Small delay between captures to avoid overwhelming the system
+                if attempt < 2:  # Don't delay after the last attempt
+                    await asyncio.sleep(0.5)
+                    
+            except Exception as e:
+                logger.error(f"Gemini OCR attempt {attempt + 1} exception: {e}")
+        
+        # Analyze results with majority voting
+        if not results:
             return {
                 "success": False,
-                "message": f"Gemini OCR failed: {result['error']}",
-                "processing_time": round(processing_time, 2),
-                "method": "gemini_vision"
+                "message": "All 3 Gemini OCR attempts failed",
+                "total_attempts": 3,
+                "processing_time": round(total_processing_time, 2),
+                "method": "gemini_majority_voting"
             }
+        
+        # Count votes for each percentage
+        from collections import Counter
+        percentages = [r["percentage"] for r in results]
+        vote_counts = Counter(percentages)
+        most_common = vote_counts.most_common()
+        
+        # Determine confidence based on agreement
+        winner_percentage = most_common[0][0]
+        winner_votes = most_common[0][1]
+        total_valid_votes = len(results)
+        
+        # Calculate real confidence based on agreement
+        confidence = winner_votes / total_valid_votes if total_valid_votes > 0 else 0
+        
+        # Only accept if we have majority agreement (at least 2/3)
+        if confidence >= 2/3:  # At least 2 out of 3 agree
+            success = True
+            message = f"{winner_votes}/{total_valid_votes} Gemini calls agreed on {winner_percentage}%"
+        else:
+            success = False  # All different results
+            message = f"No majority: got {dict(vote_counts)} - confidence too low"
+            winner_percentage = None
+        
+        return {
+            "success": success,
+            "battery_percentage": winner_percentage,
+            "confidence": round(confidence, 3),
+            "total_attempts": 3,
+            "valid_responses": total_valid_votes,
+            "vote_distribution": dict(vote_counts),
+            "processing_time": round(total_processing_time, 2),
+            "method": "gemini_majority_voting",
+            "message": message,
+            "detailed_results": results
+        }
             
     except Exception as e:
-        logger.error(f"Gemini OCR analysis failed: {e}")
+        logger.error(f"Gemini OCR majority voting failed: {e}")
         return {
             "success": False,
-            "message": f"Gemini OCR exception: {str(e)}",
-            "method": "gemini_vision"
+            "message": f"Gemini OCR voting exception: {str(e)}",
+            "method": "gemini_majority_voting",
+            "total_attempts": 3
         }
 
 async def control_device(device_name: str, turn_on: bool, force: bool = False):
@@ -755,7 +806,7 @@ async def background_worker():
     
     # Configuration
     polling_interval = int(os.getenv("POLLING_INTERVAL_SECONDS", 60))
-    confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 0.5))
+    confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 0.67))  # 2/3 majority
     screen_tap_enabled = os.getenv("SCREEN_TAP_ENABLED", "true").lower() == "true"
     
     # Reset startup sync flag on worker startup 
@@ -817,9 +868,9 @@ async def background_worker():
                 consecutive_screen_off_count = 0
                 
             # If we get here, screen should be on - proceed with OCR
-            # Perform Gemini OCR analysis
+            # Perform Gemini OCR analysis with majority voting
             start_time = time.time()
-            ocr_result = await gemini_ocr_analysis()
+            ocr_result = await gemini_ocr_analysis_with_voting()
             processing_time = time.time() - start_time
             
             if ocr_result["success"]:
@@ -859,26 +910,34 @@ async def background_worker():
                             total_attempts=ocr_result["total_attempts"],
                             raw_vote_data=ocr_result.get("raw_response")
                         )
-                        logger.info(f"Stored reading: {battery_percentage}% (conf: {confidence}, time: {processing_time:.2f}s)")
+                        logger.info(f"✅ Successfully stored reading: {battery_percentage}% (conf: {confidence}, time: {processing_time:.2f}s, method: {ocr_result.get('method', 'unknown')})")
+                        
+                        # Log voting details if available
+                        if "vote_distribution" in ocr_result:
+                            logger.info(f"Gemini voting: {ocr_result['vote_distribution']} → {ocr_result.get('message', 'majority achieved')}")
                         
                         # Check if this is the first successful reading after startup
                         startup_sync_done = await db.get_worker_state("startup_sync_complete")
                         force_devices = startup_sync_done != "true"
                         
                         # Control devices based on recommendations
-                        await control_devices_based_on_battery(battery_percentage, force=force_devices)
+                        device_control_success = await control_devices_based_on_battery(battery_percentage, force=force_devices)
                         
                         # Mark startup sync as complete after first successful device control
                         if force_devices:
                             await db.set_worker_state("startup_sync_complete", "true")
                             logger.info("Startup device synchronization complete - subsequent controls will be non-forced")
                         
+                        # Log health status for debugging
+                        logger.debug(f"Worker health: DB write ✅, Device control {'✅' if device_control_success else '❌'}")
+                        
                     else:
                         logger.debug(f"Plausibility check failed: {plausibility_msg}")
                 else:
-                    logger.debug(f"Low confidence reading skipped: {battery_percentage}% (confidence: {confidence})")
+                    logger.warning(f"❌ Low confidence reading skipped: {battery_percentage}% (confidence: {confidence}) - {ocr_result.get('message', 'no details')}")
             else:
-                logger.debug("No valid OCR results in background polling")
+                logger.warning(f"❌ OCR failed: {ocr_result.get('message', 'No valid OCR results')} - no database write")
+                # This could be causing health check failures!
                 
         except Exception as e:
             logger.error(f"Background worker error: {e}")
