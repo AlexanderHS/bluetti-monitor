@@ -824,6 +824,8 @@ async def background_worker():
             test_image = capture_image()
             screen_analysis = analyze_screen_state(test_image)
             
+            should_skip_ocr = False  # Flag to make logic clearer
+            
             if screen_analysis.get("screen_state") == "off":
                 consecutive_screen_off_count += 1
                 logger.debug(f"Screen is off (count: {consecutive_screen_off_count})")
@@ -848,26 +850,30 @@ async def background_worker():
                         
                         if screen_analysis.get("screen_state") == "on":
                             logger.info("Successfully turned screen on with SwitchBot tap!")
-                            # Continue with OCR processing below
+                            # Screen is now on, continue to OCR processing below
                         else:
                             logger.warning("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
-                            await asyncio.sleep(polling_interval)
-                            continue
+                            should_skip_ocr = True
                     else:
                         logger.debug("Cannot tap screen (rate limited or failed), skipping OCR polling")
-                        await asyncio.sleep(polling_interval)
-                        continue
+                        should_skip_ocr = True
                 else:
                     # Screen is off but we haven't reached the tap threshold yet, or rate limited
                     if screen_tap_enabled and consecutive_screen_off_count >= max_screen_off_before_tap:
                         logger.debug("Screen tap rate limited - waiting for next allowed tap window - SKIPPING OCR")
                     else:
                         logger.debug(f"Screen off, waiting for {max_screen_off_before_tap - consecutive_screen_off_count} more cycles before tapping - SKIPPING OCR")
-                    await asyncio.sleep(polling_interval)
-                    continue
+                    should_skip_ocr = True
             else:
                 # Screen is on, reset the counter
                 consecutive_screen_off_count = 0
+                logger.debug("Screen detected as ON")
+                
+            # Check if we should skip OCR
+            if should_skip_ocr:
+                logger.debug("⏭️  Skipping OCR cycle as planned")
+                await asyncio.sleep(polling_interval)
+                continue
                 
             # If we get here, screen should be on - proceed with OCR
             logger.info("🎯 Screen is ON - Starting Gemini OCR analysis with majority voting")
