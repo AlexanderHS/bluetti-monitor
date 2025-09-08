@@ -722,6 +722,13 @@ async def background_worker():
     
     logger.info(f"Worker starting: interval={polling_interval}s, min_confidence={confidence_threshold}, screen_tap={screen_tap_enabled}")
     
+    # Log SwitchBot configuration details
+    max_failure_hours = int(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 1))
+    logger.info(f"SwitchBot resilience configuration:")
+    logger.info(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
+    logger.info(f"  - Emergency bypass after: {max_switchbot_failures_before_bypass} consecutive failures")
+    logger.info(f"  - Object recreation interval: 30 minutes")
+    
     consecutive_screen_off_count = 0
     max_screen_off_before_tap = 2  # Tap after 2 consecutive "screen off" detections
     consecutive_switchbot_failures = 0
@@ -777,10 +784,8 @@ async def background_worker():
                         error_msg = tap_result.get('error', 'Unknown error')
                         logger.error(f"SwitchBot tap failed ({consecutive_switchbot_failures}/{max_switchbot_failures_before_bypass}): {error_msg}")
                         
-                        # Check if it's an authentication error (401) and try to reinitialize
-                        if "401" in str(error_msg) or "Unauthorized" in str(error_msg):
-                            logger.warning("🔄 SwitchBot 401 error detected - attempting to reinitialize connection...")
-                            await switchbot_controller.reinitialize_connection()
+                        # Modern error handling is now done in the SwitchBot controller
+                        # Error recovery happens automatically in tap_screen()
                         
                         if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
                             logger.error(f"🚨 SwitchBot failure threshold reached - will bypass screen tapping on next cycle")
@@ -878,6 +883,13 @@ async def background_worker():
                 
         except Exception as e:
             logger.error(f"Background worker error: {e}")
+        
+        # Check suicide condition (container should exit if SwitchBot broken too long)
+        suicide_check = switchbot_controller.check_suicide_condition()
+        if suicide_check["should_exit"]:
+            logger.critical("💀 Exiting container due to prolonged SwitchBot failure - Docker will restart")
+            import sys
+            sys.exit(1)
         
         await asyncio.sleep(polling_interval)
 
