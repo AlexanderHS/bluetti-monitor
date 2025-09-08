@@ -21,6 +21,7 @@ from urllib.parse import urljoin
 import aiosqlite
 from pathlib import Path
 from dotenv import load_dotenv
+from gemini_ocr import gemini_ocr
 
 load_dotenv()
 
@@ -50,6 +51,15 @@ class BatteryDatabase:
             """)
             await db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timestamp ON battery_readings(timestamp)
+            """)
+            # Worker startup tracking table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS worker_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    timestamp REAL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
             """)
             await db.commit()
     
@@ -92,6 +102,24 @@ class BatteryDatabase:
                     }
                     for row in rows
                 ]
+    
+    async def set_worker_state(self, key: str, value: str):
+        """Set a worker state value"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO worker_state (key, value, timestamp)
+                VALUES (?, ?, ?)
+            """, (key, value, datetime.now().timestamp()))
+            await db.commit()
+    
+    async def get_worker_state(self, key: str) -> Optional[str]:
+        """Get a worker state value"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT value FROM worker_state WHERE key = ?
+            """, (key,)) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
 
 def get_crop_coordinates():
     """Get battery crop coordinates from environment"""
@@ -231,144 +259,58 @@ def process_single_ocr_task(args: Tuple) -> Optional[int]:
         # Log errors in the main process, not here to avoid multiprocessing issues
         return None
 
-async def parallel_ocr_analysis(image_bytes: bytes, num_captures: int = 3) -> Dict:
+async def gemini_ocr_analysis() -> Dict:
     """
-    Perform parallelized OCR analysis across multiple captures, thresholds, and PSM modes
+    Perform OCR analysis using Gemini vision model via /capture/flip endpoint
     
-    Args:
-        image_bytes: Raw image data
-        num_captures: Number of image captures to process
-        
     Returns:
-        Dictionary with OCR results and confidence metrics
+        Dictionary with OCR results and metadata
     """
-    thresholds = [145, 150, 155, 160, 165, 170]
-    psm_modes = [6, 7, 8, 13]
-    crop_coords = get_crop_coordinates()
-    
-    all_results = []
-    capture_details = []
-    
-    # Use fewer processes to avoid overwhelming the system and ESP32
-    num_processes = min(mp.cpu_count(), 4)  # Cap at 4 to be more conservative
-    
-    for capture_num in range(num_captures):
-        try:
-            # Capture fresh image for each attempt
-            if capture_num == 0:
-                current_image = image_bytes
-            else:
-                # Add small delay between captures to be gentler on ESP32
-                await asyncio.sleep(0.5)
-                current_image = capture_image()
-            
-            # Prepare tasks for all threshold/PSM combinations
-            tasks = []
-            for threshold in thresholds:
-                for psm_mode in psm_modes:
-                    tasks.append((current_image, threshold, psm_mode, crop_coords))
-            
-            capture_start = time.time()
-            
-            # Execute OCR tasks in parallel using ProcessPoolExecutor
-            with ProcessPoolExecutor(max_workers=num_processes) as executor:
-                # Submit all tasks and collect results
-                results = list(executor.map(process_single_ocr_task, tasks))
-            
-            capture_time = time.time() - capture_start
-            
-            # Filter out None results and add to all_results
-            valid_results = [r for r in results if r is not None]
-            all_results.extend(valid_results)
-            
-            capture_details.append({
-                "capture": capture_num + 1,
-                "results_count": len(valid_results),
-                "processing_time_seconds": round(capture_time, 2),
-                "tasks_executed": len(tasks),
-                "processes_used": num_processes
-            })
-            
-        except Exception as e:
-            logger.error(f"Capture {capture_num + 1} failed: {e}")
-            capture_details.append({
-                "capture": capture_num + 1,
-                "error": str(e)
-            })
-    
-    # Enhanced voting mechanism with conflict resolution
-    if all_results:
-        vote_counts = Counter(all_results)
+    try:
+        # Use the API endpoint that the user confirmed works well with Gemini
+        api_host = os.getenv("API_HOST", "localhost")
+        api_port = os.getenv("API_PORT", "8000")
+        base_url = f"http://{api_host}:{api_port}"
         
-        # Smart conflict resolution (same logic as original)
-        def are_conflicting(num1, num2):
-            return (num1 * 10 == num2) or (num2 * 10 == num1)
+        start_time = time.time()
+        result = gemini_ocr.get_battery_percentage_from_endpoint(f"{base_url}/capture/flip")
+        processing_time = time.time() - start_time
         
-        resolved_votes = Counter()
-        conflict_detected = False
-        
-        for percentage, count in vote_counts.items():
-            conflicts_with = []
-            for other_percentage, other_count in vote_counts.items():
-                if percentage != other_percentage and are_conflicting(percentage, other_percentage):
-                    conflicts_with.append((other_percentage, other_count))
+        if result["success"]:
+            return {
+                "success": True,
+                "battery_percentage": result["percentage"],
+                "confidence": 1.0,  # Gemini is highly reliable
+                "total_attempts": 1,
+                "processing_time": round(processing_time, 2),
+                "method": "gemini_vision",
+                "raw_response": result.get("raw_response"),
+                "gemini_processing_time": result.get("processing_time")
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Gemini OCR failed: {result['error']}",
+                "processing_time": round(processing_time, 2),
+                "method": "gemini_vision"
+            }
             
-            if conflicts_with:
-                conflict_detected = True
-                # Simple resolution: prefer the one with more votes, or the 2-digit one if tied
-                should_prefer_current = True
-                for conflict_pct, conflict_count in conflicts_with:
-                    if conflict_count > count * 1.2:  # Significantly more votes
-                        should_prefer_current = False
-                        break
-                    elif conflict_count == count and len(str(conflict_pct)) == 2 and len(str(percentage)) == 1:
-                        should_prefer_current = False
-                        break
-                
-                if should_prefer_current:
-                    resolved_votes[percentage] = count
-            else:
-                resolved_votes[percentage] = count
-        
-        # Use resolved votes for final decision
-        most_common = resolved_votes.most_common()
-        winner = most_common[0] if most_common else (0, 0)
-        
-        # Calculate confidence
-        total_votes = len(all_results)
-        winning_votes = winner[1]
-        confidence = winning_votes / total_votes if total_votes > 0 else 0
-        
-        return {
-            "success": True,
-            "battery_percentage": winner[0],
-            "confidence": round(confidence, 3),
-            "total_attempts": total_votes,
-            "winning_votes": winning_votes,
-            "vote_distribution": dict(vote_counts),
-            "resolved_vote_distribution": dict(resolved_votes) if conflict_detected else None,
-            "conflict_resolution_applied": conflict_detected,
-            "captures_attempted": num_captures,
-            "captures_succeeded": len([c for c in capture_details if "error" not in c]),
-            "detailed_results": capture_details,
-            "parallelization_used": True
-        }
-    else:
+    except Exception as e:
+        logger.error(f"Gemini OCR analysis failed: {e}")
         return {
             "success": False,
-            "message": "No valid OCR results obtained",
-            "captures_attempted": num_captures,
-            "detailed_results": capture_details,
-            "parallelization_used": True
+            "message": f"Gemini OCR exception: {str(e)}",
+            "method": "gemini_vision"
         }
 
-async def control_device(device_name: str, turn_on: bool):
+async def control_device(device_name: str, turn_on: bool, force: bool = False):
     """
     Control a device via the device control API
     
     Args:
         device_name: Name of the device (e.g., "input", "output_1", "output_2")
         turn_on: True to turn on, False to turn off
+        force: True to force the command regardless of current state
     """
     control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
     control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
@@ -376,7 +318,8 @@ async def control_device(device_name: str, turn_on: bool):
     
     payload = {
         "device_name": device_name,
-        "turn_on": turn_on
+        "turn_on": turn_on,
+        "force": force
     }
     
     try:
@@ -511,15 +454,22 @@ def analyze_recent_readings_for_recommendations(readings_last_30min: List[Dict])
         "last_reading_timestamp": latest_reading["timestamp"]
     }
 
-async def control_devices_based_on_battery(battery_percentage: int):
+async def control_devices_based_on_battery(battery_percentage: int, force: bool = False):
     """
     Control devices based on battery percentage using shared recommendation logic
+    
+    Args:
+        battery_percentage: Current battery percentage
+        force: Force device commands regardless of current state
     """
     result = calculate_device_recommendations(battery_percentage)
     recommendations = result["recommendations"]
     reasoning = result["reasoning"]
     
-    logger.info(f"Device control decision: {reasoning}")
+    if force:
+        logger.info(f"Device control decision (FORCED): {reasoning}")
+    else:
+        logger.info(f"Device control decision: {reasoning}")
     
     # Control each device based on recommendations
     success_count = 0
@@ -529,13 +479,16 @@ async def control_devices_based_on_battery(battery_percentage: int):
         total_devices += 1
         turn_on = action == "turn_on"
         
-        if await control_device(device_name, turn_on):
+        if await control_device(device_name, turn_on, force=force):
             success_count += 1
         else:
             logger.error(f"Failed to control {device_name}")
     
     if success_count == total_devices:
-        logger.info(f"Successfully controlled all {total_devices} devices")
+        if force:
+            logger.info(f"Successfully forced all {total_devices} devices to desired state")
+        else:
+            logger.info(f"Successfully controlled all {total_devices} devices")
         return True
     else:
         logger.warning(f"Only {success_count}/{total_devices} devices controlled successfully")
@@ -573,6 +526,14 @@ class SwitchBotController:
         self._initialized = False
         self.last_tap_time = 0  # Track last tap timestamp
         self.min_tap_interval = 15 * 60  # 15 minutes in seconds
+        
+        # Circuit breaker state for resilience
+        self.failure_count = 0
+        self.max_failures = 5  # Open circuit after 5 consecutive failures
+        self.circuit_open_time = 0
+        self.circuit_timeout = 300  # 5 minutes before trying again
+        self.circuit_state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self.last_failure_time = 0
         
     async def initialize(self) -> bool:
         """Initialize SwitchBot connection and find the bot device"""
@@ -620,9 +581,78 @@ class SwitchBotController:
         """Check if enough time has passed since last tap (15 minute minimum)"""
         return self.get_time_until_next_tap() == 0
     
+    def _check_circuit_state(self) -> bool:
+        """Check and update circuit breaker state"""
+        current_time = time.time()
+        
+        if self.circuit_state == "OPEN":
+            # Check if timeout has expired
+            if current_time - self.circuit_open_time >= self.circuit_timeout:
+                self.circuit_state = "HALF_OPEN"
+                logger.info("SwitchBot circuit breaker moving to HALF_OPEN - attempting test")
+                return True
+            else:
+                return False  # Circuit still open
+                
+        elif self.circuit_state == "HALF_OPEN":
+            # In half-open state, allow one test request
+            return True
+            
+        else:  # CLOSED
+            return True
+    
+    def _record_success(self):
+        """Record successful operation"""
+        self.failure_count = 0
+        if self.circuit_state == "HALF_OPEN":
+            self.circuit_state = "CLOSED"
+            logger.info("SwitchBot circuit breaker closed - service recovered")
+    
+    def _record_failure(self):
+        """Record failed operation and potentially open circuit"""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        
+        if self.failure_count >= self.max_failures:
+            self.circuit_state = "OPEN"
+            self.circuit_open_time = time.time()
+            logger.error(f"SwitchBot circuit breaker opened after {self.max_failures} failures - disabling for {self.circuit_timeout}s")
+        elif self.circuit_state == "HALF_OPEN":
+            # Test failed in half-open, go back to open
+            self.circuit_state = "OPEN"
+            self.circuit_open_time = time.time()
+            logger.warning("SwitchBot circuit breaker test failed - returning to OPEN state")
+    
+    def is_healthy(self) -> dict:
+        """Get health status of SwitchBot controller"""
+        current_time = time.time()
+        
+        if self.circuit_state == "OPEN":
+            time_remaining = self.circuit_timeout - (current_time - self.circuit_open_time)
+            return {
+                "healthy": False,
+                "state": "CIRCUIT_OPEN",
+                "failure_count": self.failure_count,
+                "time_until_retry": max(0, time_remaining),
+                "last_failure": self.last_failure_time
+            }
+        elif self.circuit_state == "HALF_OPEN":
+            return {
+                "healthy": False,
+                "state": "TESTING",
+                "failure_count": self.failure_count,
+                "message": "Testing if service has recovered"
+            }
+        else:
+            return {
+                "healthy": True,
+                "state": "OPERATIONAL",
+                "failure_count": self.failure_count
+            }
+    
     async def tap_screen(self, force: bool = False) -> dict:
         """
-        Tap the screen using SwitchBot to turn it on
+        Tap the screen using SwitchBot to turn it on with circuit breaker protection
         
         Args:
             force: If True, bypass rate limiting (use with caution)
@@ -630,7 +660,18 @@ class SwitchBotController:
         Returns:
             Dictionary with success status and details
         """
+        # Check circuit breaker state first
+        if not self._check_circuit_state():
+            health = self.is_healthy()
+            return {
+                "success": False,
+                "error": "SwitchBot circuit breaker open",
+                "details": f"Service unavailable for {health['time_until_retry']:.0f} more seconds",
+                "health_status": health
+            }
+        
         if not await self.initialize():
+            self._record_failure()
             return {
                 "success": False,
                 "error": "SwitchBot not initialized",
@@ -652,6 +693,9 @@ class SwitchBotController:
             self.bot_device.press()
             self.last_tap_time = time.time()  # Record the tap time
             
+            # Record success for circuit breaker
+            self._record_success()
+            
             next_tap_time = time.time() + self.min_tap_interval
             logger.info(f"Screen tap completed - next tap allowed at {time.strftime('%H:%M:%S', time.localtime(next_tap_time))}")
             
@@ -665,10 +709,12 @@ class SwitchBotController:
             
         except Exception as e:
             logger.error(f"Failed to tap screen with SwitchBot: {e}")
+            self._record_failure()  # Record failure for circuit breaker
             return {
                 "success": False,
                 "error": "Tap failed",
-                "details": str(e)
+                "details": str(e),
+                "health_status": self.is_healthy()
             }
     
     async def get_status(self) -> dict:
@@ -691,7 +737,10 @@ class SwitchBotController:
             "time_until_next_tap_seconds": time_until_next,
             "time_until_next_tap_minutes": round(time_until_next / 60, 1),
             "last_tap_time": self.last_tap_time if self.last_tap_time > 0 else None,
-            "rate_limit_minutes": self.min_tap_interval / 60
+            "rate_limit_minutes": self.min_tap_interval / 60,
+            "health_status": self.is_healthy(),
+            "circuit_state": self.circuit_state,
+            "failure_count": self.failure_count
         }
 
 
@@ -708,6 +757,10 @@ async def background_worker():
     polling_interval = int(os.getenv("POLLING_INTERVAL_SECONDS", 60))
     confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 0.5))
     screen_tap_enabled = os.getenv("SCREEN_TAP_ENABLED", "true").lower() == "true"
+    
+    # Reset startup sync flag on worker startup 
+    await db.set_worker_state("startup_sync_complete", "false")
+    logger.info("Worker startup: reset device sync flag - first recommendation will be forced")
     
     logger.info(f"Worker starting: interval={polling_interval}s, min_confidence={confidence_threshold}, screen_tap={screen_tap_enabled}")
     
@@ -764,9 +817,9 @@ async def background_worker():
                 consecutive_screen_off_count = 0
                 
             # If we get here, screen should be on - proceed with OCR
-            # Perform parallelized OCR analysis
+            # Perform Gemini OCR analysis
             start_time = time.time()
-            ocr_result = await parallel_ocr_analysis(test_image, num_captures=3)
+            ocr_result = await gemini_ocr_analysis()
             processing_time = time.time() - start_time
             
             if ocr_result["success"]:
@@ -802,14 +855,23 @@ async def background_worker():
                         await db.insert_reading(
                             battery_percentage=battery_percentage,
                             confidence=confidence,
-                            ocr_method="worker_parallel",
+                            ocr_method="worker_gemini",
                             total_attempts=ocr_result["total_attempts"],
-                            raw_vote_data=ocr_result["vote_distribution"]
+                            raw_vote_data=ocr_result.get("raw_response")
                         )
                         logger.info(f"Stored reading: {battery_percentage}% (conf: {confidence}, time: {processing_time:.2f}s)")
                         
-                        # NEW: Get recommendations and control devices
-                        await control_devices_based_on_battery(battery_percentage)
+                        # Check if this is the first successful reading after startup
+                        startup_sync_done = await db.get_worker_state("startup_sync_complete")
+                        force_devices = startup_sync_done != "true"
+                        
+                        # Control devices based on recommendations
+                        await control_devices_based_on_battery(battery_percentage, force=force_devices)
+                        
+                        # Mark startup sync as complete after first successful device control
+                        if force_devices:
+                            await db.set_worker_state("startup_sync_complete", "true")
+                            logger.info("Startup device synchronization complete - subsequent controls will be non-forced")
                         
                     else:
                         logger.debug(f"Plausibility check failed: {plausibility_msg}")
