@@ -722,17 +722,18 @@ async def background_worker():
     
     logger.info(f"Worker starting: interval={polling_interval}s, min_confidence={confidence_threshold}, screen_tap={screen_tap_enabled}")
     
-    # Log SwitchBot configuration details
-    max_failure_hours = int(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 1))
-    logger.info(f"SwitchBot resilience configuration:")
-    logger.info(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
-    logger.info(f"  - Emergency bypass after: {max_switchbot_failures_before_bypass} consecutive failures")
-    logger.info(f"  - Object recreation interval: 30 minutes")
-    
+    # Define constants first
     consecutive_screen_off_count = 0
     max_screen_off_before_tap = 2  # Tap after 2 consecutive "screen off" detections
     consecutive_switchbot_failures = 0
     max_switchbot_failures_before_bypass = 5  # Bypass screen tapping after 5 consecutive failures
+    max_failure_hours = int(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 1))
+    
+    # Log SwitchBot configuration details
+    logger.info(f"SwitchBot resilience configuration:")
+    logger.info(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
+    logger.info(f"  - Emergency bypass after: {max_switchbot_failures_before_bypass} consecutive failures")
+    logger.info(f"  - Object recreation interval: 30 minutes")
     
     while True:
         try:
