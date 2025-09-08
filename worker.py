@@ -259,19 +259,39 @@ def process_single_ocr_task(args: Tuple) -> Optional[int]:
         # Log errors in the main process, not here to avoid multiprocessing issues
         return None
 
+def capture_and_process_image_for_gemini():
+    """
+    Capture image from ESP32, crop and flip it for Gemini OCR (same as /capture/flip endpoint)
+    
+    Returns:
+        bytes: Processed JPEG image data ready for Gemini
+    """
+    # Capture from ESP32 directly
+    image_bytes = capture_image()
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if img is None:
+        raise Exception("Failed to decode image from ESP32")
+    
+    # Get crop coordinates, crop, and flip (same as /capture/flip endpoint)
+    coords = get_crop_coordinates()
+    cropped = img[coords['y1']:coords['y2'], coords['x1']:coords['x2']]
+    flipped = cv2.flip(cropped, 1)  # Flip horizontally
+    
+    # Encode as JPEG
+    _, buffer = cv2.imencode('.jpg', flipped)
+    return buffer.tobytes()
+
 async def gemini_ocr_analysis_with_voting() -> Dict:
     """
     Perform OCR analysis using Gemini vision model with 3-capture majority voting
+    Direct image processing - no HTTP self-calls
     
     Returns:
         Dictionary with OCR results and real confidence based on agreement
     """
     try:
-        # Use the API service hostname for Docker container communication
-        api_host = os.getenv("API_HOST", "bluetti-monitor-api")  # Docker service name
-        api_port = os.getenv("API_PORT", "8000")
-        base_url = f"http://{api_host}:{api_port}"
-        
         results = []
         total_processing_time = 0
         
@@ -279,7 +299,13 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
         for attempt in range(3):
             try:
                 start_time = time.time()
-                result = gemini_ocr.get_battery_percentage_from_endpoint(f"{base_url}/capture/flip")
+                
+                # Get processed image directly (no HTTP calls)
+                processed_image = capture_and_process_image_for_gemini()
+                
+                # Send directly to Gemini
+                result = gemini_ocr._analyze_image_with_gemini(processed_image)
+                
                 processing_time = time.time() - start_time
                 total_processing_time += processing_time
                 
@@ -306,7 +332,7 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
                 "message": "All 3 Gemini OCR attempts failed",
                 "total_attempts": 3,
                 "processing_time": round(total_processing_time, 2),
-                "method": "gemini_majority_voting"
+                "method": "gemini_direct_voting"
             }
         
         # Count votes for each percentage
@@ -340,17 +366,17 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
             "valid_responses": total_valid_votes,
             "vote_distribution": dict(vote_counts),
             "processing_time": round(total_processing_time, 2),
-            "method": "gemini_majority_voting",
+            "method": "gemini_direct_voting",
             "message": message,
             "detailed_results": results
         }
             
     except Exception as e:
-        logger.error(f"Gemini OCR majority voting failed: {e}")
+        logger.error(f"Gemini OCR direct voting failed: {e}")
         return {
             "success": False,
             "message": f"Gemini OCR voting exception: {str(e)}",
-            "method": "gemini_majority_voting",
+            "method": "gemini_direct_voting",
             "total_attempts": 3
         }
 
