@@ -22,6 +22,7 @@ import aiosqlite
 from pathlib import Path
 from dotenv import load_dotenv
 from gemini_ocr import gemini_ocr
+from groq_ocr import groq_ocr
 
 load_dotenv()
 
@@ -283,14 +284,135 @@ def capture_and_process_image_for_gemini():
     _, buffer = cv2.imencode('.jpg', flipped)
     return buffer.tobytes()
 
+async def groq_fallback_analysis_with_voting() -> Dict:
+    """
+    Perform OCR analysis using GROQ Llama 4 Scout as fallback
+    Uses same voting mechanism as Gemini
+    
+    Returns:
+        Dictionary with OCR results and confidence based on agreement
+    """
+    try:
+        if not groq_ocr.is_available():
+            return {
+                "success": False,
+                "message": "GROQ OCR not available - check API key",
+                "method": "groq_fallback"
+            }
+        
+        results = []
+        total_processing_time = 0
+        
+        # Take 3 captures for majority voting (same as Gemini)
+        for attempt in range(3):
+            try:
+                start_time = time.time()
+                
+                # Get processed image directly
+                processed_image = capture_and_process_image_for_gemini()
+                
+                # Send to GROQ
+                result = groq_ocr.analyze_image_with_groq(processed_image)
+                
+                processing_time = time.time() - start_time
+                total_processing_time += processing_time
+                
+                if result["success"]:
+                    results.append({
+                        "percentage": result["percentage"],
+                        "processing_time": result.get("processing_time", 0),
+                        "raw_response": result.get("raw_response")
+                    })
+                else:
+                    logger.warning(f"GROQ OCR attempt {attempt + 1} failed: {result['error']}")
+                
+                # Small delay between captures
+                if attempt < 2:
+                    await asyncio.sleep(0.5)
+                    
+            except Exception as e:
+                logger.error(f"GROQ OCR attempt {attempt + 1} exception: {e}")
+        
+        # Analyze results with majority voting (same logic as Gemini)
+        if not results:
+            return {
+                "success": False,
+                "message": "All 3 GROQ OCR attempts failed",
+                "total_attempts": 3,
+                "processing_time": round(total_processing_time, 2),
+                "method": "groq_fallback"
+            }
+        
+        # Count votes for each percentage
+        from collections import Counter
+        percentages = [r["percentage"] for r in results]
+        vote_counts = Counter(percentages)
+        most_common = vote_counts.most_common()
+        
+        # Determine confidence based on agreement
+        winner_percentage = most_common[0][0]
+        winner_votes = most_common[0][1]
+        total_valid_votes = len(results)
+        
+        # Calculate real confidence based on agreement
+        confidence = winner_votes / total_valid_votes if total_valid_votes > 0 else 0
+        
+        # Accept if we have majority agreement (at least 2/3)
+        if confidence >= 2/3:
+            success = True
+            message = f"{winner_votes}/{total_valid_votes} GROQ calls agreed on {winner_percentage}%"
+        else:
+            success = False
+            message = f"No majority: got {dict(vote_counts)} - confidence too low"
+            winner_percentage = None
+        
+        return {
+            "success": success,
+            "battery_percentage": winner_percentage,
+            "confidence": round(confidence, 3),
+            "total_attempts": 3,
+            "valid_responses": total_valid_votes,
+            "vote_distribution": dict(vote_counts),
+            "processing_time": round(total_processing_time, 2),
+            "method": "groq_fallback",
+            "message": message,
+            "detailed_results": results
+        }
+            
+    except Exception as e:
+        logger.error(f"GROQ OCR fallback voting failed: {e}")
+        return {
+            "success": False,
+            "message": f"GROQ OCR voting exception: {str(e)}",
+            "method": "groq_fallback",
+            "total_attempts": 3
+        }
+
 async def gemini_ocr_analysis_with_voting() -> Dict:
     """
     Perform OCR analysis using Gemini vision model with 3-capture majority voting
+    Includes automatic fallback to GROQ if Gemini fails completely
     Direct image processing - no HTTP self-calls
+    
+    Environment variables:
+    - PREFER_GROQ_OCR=true: Use GROQ as primary OCR provider (for testing)
     
     Returns:
         Dictionary with OCR results and real confidence based on agreement
     """
+    # Check if GROQ should be prioritized for testing
+    prefer_groq = os.getenv("PREFER_GROQ_OCR", "false").lower() == "true"
+    
+    if prefer_groq:
+        logger.info("🔄 PREFER_GROQ_OCR=true - using GROQ as primary OCR provider")
+        groq_result = await groq_fallback_analysis_with_voting()
+        if groq_result["success"]:
+            logger.info(f"✅ GROQ primary successful: {groq_result['battery_percentage']}% (confidence: {groq_result['confidence']})")
+            return groq_result
+        else:
+            logger.warning("GROQ primary failed - falling back to Gemini")
+            # Continue to Gemini below
+    
     try:
         results = []
         total_processing_time = 0
@@ -327,13 +449,24 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
         
         # Analyze results with majority voting
         if not results:
-            return {
-                "success": False,
-                "message": "All 3 Gemini OCR attempts failed",
-                "total_attempts": 3,
-                "processing_time": round(total_processing_time, 2),
-                "method": "gemini_direct_voting"
-            }
+            logger.warning("All 3 Gemini OCR attempts failed - trying GROQ fallback")
+            
+            # Try GROQ fallback
+            groq_result = await groq_fallback_analysis_with_voting()
+            if groq_result["success"]:
+                logger.info(f"🔄 GROQ fallback successful: {groq_result['battery_percentage']}% (confidence: {groq_result['confidence']})")
+                return groq_result
+            else:
+                logger.error("Both Gemini and GROQ OCR failed completely")
+                return {
+                    "success": False,
+                    "message": "All 3 Gemini OCR attempts failed, GROQ fallback also failed",
+                    "total_attempts": 6,  # 3 Gemini + 3 GROQ
+                    "processing_time": round(total_processing_time + groq_result.get("processing_time", 0), 2),
+                    "method": "gemini_with_groq_fallback",
+                    "gemini_error": "All attempts failed",
+                    "groq_error": groq_result.get("message", "Unknown error")
+                }
         
         # Count votes for each percentage
         from collections import Counter
