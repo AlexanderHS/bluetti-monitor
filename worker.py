@@ -574,6 +574,7 @@ logger = logging.getLogger(__name__)
 def calculate_device_recommendations(battery_percentage: int) -> Dict:
     """
     Calculate device control recommendations based on battery percentage
+    Alternates between output_1 and output_2 based on time to prevent circuit overload
     
     Args:
         battery_percentage: Current battery percentage (0-100)
@@ -599,23 +600,28 @@ def calculate_device_recommendations(battery_percentage: int) -> Dict:
         }
         reasoning = f"Battery at {battery_percentage}% - low, conserving power"
         
-    elif 60 <= battery_percentage < 80:
-        # Between 60-80% - turn off input, turn on one output (moderate drain)
-        recommendations = {
-            "input": "turn_off",
-            "output_1": "turn_on",
-            "output_2": "turn_off"
-        }
-        reasoning = f"Battery at {battery_percentage}% - moderate level, using one output for moderate drain"
+    else:  # battery_percentage >= 60
+        # Above 60% - turn off input, turn on ONE output (alternating by time to prevent circuit overload)
+        current_minute = datetime.now().minute
         
-    else:  # battery_percentage >= 80
-        # Above 80% - turn off input, turn on both outputs (rapid drain)
-        recommendations = {
-            "input": "turn_off",
-            "output_1": "turn_on",
-            "output_2": "turn_on"
-        }
-        reasoning = f"Battery at {battery_percentage}% - high level, using both outputs for rapid drain"
+        if current_minute < 30:
+            # First half hour: use output_1
+            recommendations = {
+                "input": "turn_off",
+                "output_1": "turn_on",
+                "output_2": "turn_off"
+            }
+            active_output = "output_1"
+        else:
+            # Second half hour: use output_2
+            recommendations = {
+                "input": "turn_off",
+                "output_1": "turn_off",
+                "output_2": "turn_on"
+            }
+            active_output = "output_2"
+        
+        reasoning = f"Battery at {battery_percentage}% - good level, using {active_output} (alternating by time to prevent circuit overload)"
     
     return {
         "recommendations": recommendations,
