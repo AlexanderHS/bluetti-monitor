@@ -267,8 +267,8 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
         Dictionary with OCR results and real confidence based on agreement
     """
     try:
-        # Use the API endpoint that sends raw flipped images (no thresholding)
-        api_host = os.getenv("API_HOST", "localhost")
+        # Use the API service hostname for Docker container communication
+        api_host = os.getenv("API_HOST", "bluetti-monitor-api")  # Docker service name
         api_port = os.getenv("API_PORT", "8000")
         base_url = f"http://{api_host}:{api_port}"
         
@@ -820,7 +820,7 @@ async def background_worker():
     
     while True:
         try:
-            # Check if screen is on
+            # Check if screen is on (capture directly from ESP32 for screen analysis)
             test_image = capture_image()
             screen_analysis = analyze_screen_state(test_image)
             
@@ -850,7 +850,7 @@ async def background_worker():
                             logger.info("Successfully turned screen on with SwitchBot tap!")
                             # Continue with OCR processing below
                         else:
-                            logger.warning("Screen tap didn't turn screen on, will retry next cycle")
+                            logger.warning("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
                             await asyncio.sleep(polling_interval)
                             continue
                     else:
@@ -860,7 +860,9 @@ async def background_worker():
                 else:
                     # Screen is off but we haven't reached the tap threshold yet, or rate limited
                     if screen_tap_enabled and consecutive_screen_off_count >= max_screen_off_before_tap:
-                        logger.debug("Screen tap rate limited - waiting for next allowed tap window")
+                        logger.debug("Screen tap rate limited - waiting for next allowed tap window - SKIPPING OCR")
+                    else:
+                        logger.debug(f"Screen off, waiting for {max_screen_off_before_tap - consecutive_screen_off_count} more cycles before tapping - SKIPPING OCR")
                     await asyncio.sleep(polling_interval)
                     continue
             else:
@@ -868,7 +870,7 @@ async def background_worker():
                 consecutive_screen_off_count = 0
                 
             # If we get here, screen should be on - proceed with OCR
-            # Perform Gemini OCR analysis with majority voting
+            logger.info("🎯 Screen is ON - Starting Gemini OCR analysis with majority voting")
             start_time = time.time()
             ocr_result = await gemini_ocr_analysis_with_voting()
             processing_time = time.time() - start_time
