@@ -183,8 +183,8 @@ class SwitchBotController:
         max_failure_seconds = max_failure_hours * 3600
         current_time = time.time()
         
-        # If we've never had a successful tap, use object creation time as baseline
-        baseline_time = self.last_successful_tap_time or self.last_object_recreation_time or current_time
+        # If we've never had a successful tap, use current time as baseline
+        baseline_time = self.last_successful_tap_time or current_time
         time_since_last_success = current_time - baseline_time
         
         result = {
