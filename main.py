@@ -43,6 +43,9 @@ class BatteryDatabase:
     async def init_db(self):
         """Initialize database with required tables"""
         async with aiosqlite.connect(self.db_path) as db:
+            # Check if we need to migrate existing database
+            await self._migrate_database_if_needed(db)
+            
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS battery_readings (
@@ -53,6 +56,8 @@ class BatteryDatabase:
                     ocr_method TEXT,
                     total_attempts INTEGER,
                     raw_vote_data TEXT,
+                    raw_battery_percentage INTEGER,
+                    median_filtered BOOLEAN DEFAULT FALSE,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """
@@ -64,6 +69,52 @@ class BatteryDatabase:
             )
             await db.commit()
 
+    async def _migrate_database_if_needed(self, db):
+        """Migrate existing database to add new columns"""
+        try:
+            # Check if raw_battery_percentage column exists
+            async with db.execute("PRAGMA table_info(battery_readings)") as cursor:
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                if 'raw_battery_percentage' not in column_names:
+                    logger.info("Migrating database: adding median filter columns")
+                    await db.execute("ALTER TABLE battery_readings ADD COLUMN raw_battery_percentage INTEGER")
+                    await db.execute("ALTER TABLE battery_readings ADD COLUMN median_filtered BOOLEAN DEFAULT FALSE")
+                    
+                    # Update existing records to set raw_battery_percentage = battery_percentage
+                    await db.execute("UPDATE battery_readings SET raw_battery_percentage = battery_percentage WHERE raw_battery_percentage IS NULL")
+                    await db.commit()
+                    logger.info("Database migration completed")
+                    
+        except Exception as e:
+            logger.warning(f"Database migration failed: {e}")
+
+    async def calculate_median_filtered_reading(self, current_reading: int, confidence: float) -> int:
+        """Calculate median of last 3 readings to smooth out false zeros"""
+        try:
+            # Get last 3 readings
+            recent_readings = await self.get_recent_readings(limit=3)
+            
+            # If we don't have enough readings, return current reading
+            if len(recent_readings) < 2:
+                return current_reading
+            
+            # Extract battery percentages from recent readings
+            readings = [r["battery_percentage"] for r in recent_readings]
+            readings.append(current_reading)  # Add current reading
+            
+            # Calculate median
+            readings.sort()
+            median_reading = readings[len(readings) // 2]
+            
+            logger.info(f"Median filter: readings={readings} -> median={median_reading} (current={current_reading})")
+            return median_reading
+            
+        except Exception as e:
+            logger.warning(f"Median filter failed: {e}, using current reading")
+            return current_reading
+
     async def insert_reading(
         self,
         battery_percentage: int,
@@ -72,26 +123,38 @@ class BatteryDatabase:
         total_attempts: int = None,
         raw_vote_data: dict = None,
     ):
-        """Insert a new battery reading"""
+        """Insert a new battery reading with median filtering"""
+        # Apply median filtering for readings with sufficient confidence
+        filtered_percentage = battery_percentage
+        is_filtered = False
+        
+        if confidence >= 0.8:  # Only apply median filter to high-confidence readings
+            filtered_percentage = await self.calculate_median_filtered_reading(battery_percentage, confidence)
+            is_filtered = (filtered_percentage != battery_percentage)
+        
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO battery_readings 
-                (timestamp, battery_percentage, confidence, ocr_method, total_attempts, raw_vote_data)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (timestamp, battery_percentage, confidence, ocr_method, total_attempts, raw_vote_data, raw_battery_percentage, median_filtered)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     datetime.now().timestamp(),
-                    battery_percentage,
+                    filtered_percentage,  # Store the filtered value as the main reading
                     confidence,
                     ocr_method,
                     total_attempts,
                     json.dumps(raw_vote_data) if raw_vote_data else None,
+                    battery_percentage,  # Store original raw value
+                    is_filtered
                 ),
             )
             await db.commit()
+            
+            filter_msg = f" (filtered: {battery_percentage}% -> {filtered_percentage}%)" if is_filtered else ""
             logger.info(
-                f"Stored battery reading: {battery_percentage}% (confidence: {confidence}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                f"Stored battery reading: {filtered_percentage}% (confidence: {confidence}){filter_msg} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
     async def get_recent_readings(self, limit: int = 10) -> List[Dict]:
