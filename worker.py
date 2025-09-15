@@ -120,20 +120,25 @@ class BatteryDatabase:
             logger.warning(f"Median filter failed: {e}, using current reading")
             return current_reading
 
-    async def insert_reading(self, battery_percentage: int, confidence: float, 
-                           ocr_method: str = None, total_attempts: int = None, 
-                           raw_vote_data: dict = None):
+    async def insert_reading(self, battery_percentage: int, confidence: float,
+                           ocr_method: str = None, total_attempts: int = None,
+                           raw_vote_data: dict = None) -> int:
+        """Insert a new battery reading with median filtering.
+
+        Returns:
+            int: The filtered battery percentage that was stored
+        """
         # Apply median filtering for readings with sufficient confidence
         filtered_percentage = battery_percentage
         is_filtered = False
-        
+
         if confidence >= 0.8:  # Only apply median filter to high-confidence readings
             filtered_percentage = await self.calculate_median_filtered_reading(battery_percentage, confidence)
             is_filtered = (filtered_percentage != battery_percentage)
-        
+
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                INSERT INTO battery_readings 
+                INSERT INTO battery_readings
                 (timestamp, battery_percentage, confidence, ocr_method, total_attempts, raw_vote_data, raw_battery_percentage, median_filtered)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -147,9 +152,11 @@ class BatteryDatabase:
                 is_filtered
             ))
             await db.commit()
-            
+
             filter_msg = f" (filtered: {battery_percentage}% -> {filtered_percentage}%)" if is_filtered else ""
             logger.info(f"Stored battery reading: {filtered_percentage}% (confidence: {confidence}){filter_msg} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        return filtered_percentage  # Return the filtered value for use in device control
     
     async def get_recent_readings(self, limit: int = 10) -> List[Dict]:
         async with aiosqlite.connect(self.db_path) as db:
@@ -918,8 +925,8 @@ async def background_worker():
                         pass
                     
                     if should_store:
-                        # Store in database
-                        await db.insert_reading(
+                        # Store in database and get the filtered percentage
+                        filtered_percentage = await db.insert_reading(
                             battery_percentage=battery_percentage,
                             confidence=confidence,
                             ocr_method="worker_gemini",
@@ -927,17 +934,17 @@ async def background_worker():
                             raw_vote_data=ocr_result.get("raw_response")
                         )
                         logger.info(f"✅ Successfully stored reading: {battery_percentage}% (conf: {confidence}, time: {processing_time:.2f}s, method: {ocr_result.get('method', 'unknown')})")
-                        
+
                         # Log voting details if available
                         if "vote_distribution" in ocr_result:
                             logger.info(f"Gemini voting: {ocr_result['vote_distribution']} → {ocr_result.get('message', 'majority achieved')}")
-                        
+
                         # Check if this is the first successful reading after startup
                         startup_sync_done = await db.get_worker_state("startup_sync_complete")
                         force_devices = startup_sync_done != "true"
-                        
-                        # Control devices based on recommendations
-                        device_control_success = await control_devices_based_on_battery(battery_percentage, force=force_devices)
+
+                        # Control devices based on the filtered percentage
+                        device_control_success = await control_devices_based_on_battery(filtered_percentage, force=force_devices)
                         
                         # Mark startup sync as complete after first successful device control
                         if force_devices:
