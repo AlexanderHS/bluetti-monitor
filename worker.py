@@ -418,27 +418,44 @@ async def groq_fallback_analysis_with_voting() -> Dict:
                 "method": "groq_fallback"
             }
         
-        # Count votes for each percentage
+        # Count votes for each percentage, considering adjacent values as agreement
         from collections import Counter
         percentages = [r["percentage"] for r in results]
-        vote_counts = Counter(percentages)
-        most_common = vote_counts.most_common()
-        
-        # Determine confidence based on agreement
-        winner_percentage = most_common[0][0]
-        winner_votes = most_common[0][1]
+
+        # Group adjacent values (±1) together
+        vote_groups = {}
+        for p in percentages:
+            # Find if this percentage belongs to an existing group
+            found_group = False
+            for group_key in list(vote_groups.keys()):
+                if abs(p - group_key) <= 1:
+                    vote_groups[group_key].append(p)
+                    found_group = True
+                    break
+            if not found_group:
+                vote_groups[p] = [p]
+
+        # Find the largest group
+        largest_group = max(vote_groups.values(), key=len)
+        winner_percentage = round(sum(largest_group) / len(largest_group))  # Use average of group
+        winner_votes = len(largest_group)
         total_valid_votes = len(results)
-        
+
         # Calculate real confidence based on agreement
         confidence = winner_votes / total_valid_votes if total_valid_votes > 0 else 0
-        
+
         # Accept if we have majority agreement (at least 2/3)
         if confidence >= 2/3:
             success = True
-            message = f"{winner_votes}/{total_valid_votes} GROQ calls agreed on {winner_percentage}%"
+            raw_counts = Counter(percentages)
+            if len(set(largest_group)) > 1:
+                message = f"{winner_votes}/{total_valid_votes} GROQ calls agreed on {winner_percentage}% (adjacent values: {sorted(set(largest_group))})"
+            else:
+                message = f"{winner_votes}/{total_valid_votes} GROQ calls agreed on {winner_percentage}%"
         else:
             success = False
-            message = f"No majority: got {dict(vote_counts)} - confidence too low"
+            raw_counts = Counter(percentages)
+            message = f"No majority: got {dict(raw_counts)} - confidence too low"
             winner_percentage = None
         
         return {
@@ -447,7 +464,7 @@ async def groq_fallback_analysis_with_voting() -> Dict:
             "confidence": round(confidence, 3),
             "total_attempts": 3,
             "valid_responses": total_valid_votes,
-            "vote_distribution": dict(vote_counts),
+            "vote_distribution": dict(raw_counts),
             "processing_time": round(total_processing_time, 2),
             "method": "groq_fallback",
             "message": message,
@@ -543,27 +560,44 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
                     "groq_error": groq_result.get("message", "Unknown error")
                 }
         
-        # Count votes for each percentage
+        # Count votes for each percentage, considering adjacent values as agreement
         from collections import Counter
         percentages = [r["percentage"] for r in results]
-        vote_counts = Counter(percentages)
-        most_common = vote_counts.most_common()
-        
-        # Determine confidence based on agreement
-        winner_percentage = most_common[0][0]
-        winner_votes = most_common[0][1]
+
+        # Group adjacent values (±1) together
+        vote_groups = {}
+        for p in percentages:
+            # Find if this percentage belongs to an existing group
+            found_group = False
+            for group_key in list(vote_groups.keys()):
+                if abs(p - group_key) <= 1:
+                    vote_groups[group_key].append(p)
+                    found_group = True
+                    break
+            if not found_group:
+                vote_groups[p] = [p]
+
+        # Find the largest group
+        largest_group = max(vote_groups.values(), key=len)
+        winner_percentage = round(sum(largest_group) / len(largest_group))  # Use average of group
+        winner_votes = len(largest_group)
         total_valid_votes = len(results)
-        
+
         # Calculate real confidence based on agreement
         confidence = winner_votes / total_valid_votes if total_valid_votes > 0 else 0
-        
+
         # Only accept if we have majority agreement (at least 2/3)
         if confidence >= 2/3:  # At least 2 out of 3 agree
             success = True
-            message = f"{winner_votes}/{total_valid_votes} Gemini calls agreed on {winner_percentage}%"
+            raw_counts = Counter(percentages)
+            if len(set(largest_group)) > 1:
+                message = f"{winner_votes}/{total_valid_votes} Gemini calls agreed on {winner_percentage}% (adjacent values: {sorted(set(largest_group))})"
+            else:
+                message = f"{winner_votes}/{total_valid_votes} Gemini calls agreed on {winner_percentage}%"
         else:
             success = False  # All different results
-            message = f"No majority: got {dict(vote_counts)} - confidence too low"
+            raw_counts = Counter(percentages)
+            message = f"No majority: got {dict(raw_counts)} - confidence too low"
             winner_percentage = None
         
         return {
@@ -572,7 +606,7 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
             "confidence": round(confidence, 3),
             "total_attempts": 3,
             "valid_responses": total_valid_votes,
-            "vote_distribution": dict(vote_counts),
+            "vote_distribution": dict(raw_counts),
             "processing_time": round(total_processing_time, 2),
             "method": "gemini_direct_voting",
             "message": message,
@@ -619,7 +653,7 @@ async def control_device(device_name: str, turn_on: bool, force: bool = False):
         )
         
         if response.status_code == 200:
-            logger.info(f"Successfully controlled device {device_name}: {'on' if turn_on else 'off'}")
+            logger.debug(f"Successfully controlled device {device_name}: {'on' if turn_on else 'off'}")
             return True
         else:
             logger.error(f"Failed to control device {device_name}: HTTP {response.status_code}")
@@ -758,9 +792,9 @@ async def control_devices_based_on_battery(battery_percentage: int, force: bool 
     reasoning = result["reasoning"]
     
     if force:
-        logger.info(f"Device control decision (FORCED): {reasoning}")
+        logger.debug(f"Device control decision (FORCED): {reasoning}")
     else:
-        logger.info(f"Device control decision: {reasoning}")
+        logger.debug(f"Device control decision: {reasoning}")
     
     # Control each device based on recommendations
     success_count = 0
@@ -776,10 +810,12 @@ async def control_devices_based_on_battery(battery_percentage: int, force: bool 
             logger.error(f"Failed to control {device_name}")
     
     if success_count == total_devices:
-        if force:
-            logger.info(f"Successfully forced all {total_devices} devices to desired state")
+        # Log device changes if any occurred
+        if any(changed_devices.values()):
+            changes = [name for name, changed in changed_devices.items() if changed]
+            logger.info(f"⚡ Devices changed: {', '.join(changes)}")
         else:
-            logger.info(f"Successfully controlled all {total_devices} devices")
+            logger.debug(f"Devices unchanged (all {total_devices} already in correct state)")
         return True
     else:
         logger.warning(f"Only {success_count}/{total_devices} devices controlled successfully")
@@ -810,10 +846,10 @@ async def background_worker():
     max_failure_hours = int(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 1))
     
     # Log SwitchBot configuration details
-    logger.info(f"SwitchBot resilience configuration:")
-    logger.info(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
-    logger.info(f"  - Emergency bypass after: {max_switchbot_failures_before_bypass} consecutive failures")
-    logger.info(f"  - Fresh object creation: Every tap creates new SwitchBot API object")
+    logger.debug(f"SwitchBot resilience configuration:")
+    logger.debug(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
+    logger.debug(f"  - Emergency bypass after: {max_switchbot_failures_before_bypass} consecutive failures")
+    logger.debug(f"  - Fresh object creation: Every tap creates new SwitchBot API object")
     
     while True:
         try:
@@ -838,7 +874,7 @@ async def background_worker():
                     consecutive_screen_off_count >= max_screen_off_before_tap and
                     switchbot_controller.can_tap_screen()):  # Check rate limit
                     
-                    logger.info(f"Screen has been off for {consecutive_screen_off_count} cycles, attempting to tap it on")
+                    logger.debug(f"Screen has been off for {consecutive_screen_off_count} cycles, attempting to tap it on")
                     
                     tap_result = await switchbot_controller.tap_screen()
                     if tap_result.get("success"):
@@ -854,10 +890,10 @@ async def background_worker():
                         screen_analysis = analyze_screen_state(test_image)
                         
                         if screen_analysis.get("screen_state") == "on":
-                            logger.info("Successfully turned screen on with SwitchBot tap!")
+                            logger.debug("Successfully turned screen on with SwitchBot tap!")
                             # Screen is now on, continue to OCR processing below
                         else:
-                            logger.warning("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
+                            logger.debug("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
                             should_skip_ocr = True
                     else:
                         # SwitchBot tap failed - increment failure counter
@@ -891,7 +927,7 @@ async def background_worker():
                 continue
                 
             # If we get here, screen should be on - proceed with OCR
-            logger.info("🎯 Screen is ON - Starting Gemini OCR analysis with majority voting")
+            logger.debug("🎯 Screen is ON - Starting Gemini OCR analysis with majority voting")
             start_time = time.time()
             ocr_result = await gemini_ocr_analysis_with_voting()
             processing_time = time.time() - start_time
@@ -933,11 +969,11 @@ async def background_worker():
                             total_attempts=ocr_result["total_attempts"],
                             raw_vote_data=ocr_result.get("raw_response")
                         )
-                        logger.info(f"✅ Successfully stored reading: {battery_percentage}% (conf: {confidence}, time: {processing_time:.2f}s, method: {ocr_result.get('method', 'unknown')})")
-
-                        # Log voting details if available
-                        if "vote_distribution" in ocr_result:
-                            logger.info(f"Gemini voting: {ocr_result['vote_distribution']} → {ocr_result.get('message', 'majority achieved')}")
+                        # Compact logging - combine reading and voting details
+                        vote_info = ""
+                        if "vote_distribution" in ocr_result and len(ocr_result['vote_distribution']) > 1:
+                            vote_info = f" [{ocr_result['vote_distribution']}]"
+                        logger.info(f"📊 {battery_percentage}% (conf: {confidence:.2f}){vote_info}")
 
                         # Check if this is the first successful reading after startup
                         startup_sync_done = await db.get_worker_state("startup_sync_complete")
@@ -949,7 +985,7 @@ async def background_worker():
                         # Mark startup sync as complete after first successful device control
                         if force_devices:
                             await db.set_worker_state("startup_sync_complete", "true")
-                            logger.info("Startup device synchronization complete - subsequent controls will be non-forced")
+                            logger.debug("Startup device synchronization complete - subsequent controls will be non-forced")
                         
                         # Log health status for debugging
                         logger.debug(f"Worker health: DB write ✅, Device control {'✅' if device_control_success else '❌'}")
@@ -959,7 +995,7 @@ async def background_worker():
                 else:
                     logger.warning(f"❌ Low confidence reading skipped: {battery_percentage}% (confidence: {confidence}) - {ocr_result.get('message', 'no details')}")
             else:
-                logger.warning(f"❌ OCR failed: {ocr_result.get('message', 'No valid OCR results')} - no database write")
+                logger.info(f"❌ OCR failed: {ocr_result.get('message', 'No valid OCR results')}")
                 # This could be causing health check failures!
                 
         except Exception as e:

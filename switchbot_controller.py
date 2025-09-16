@@ -44,12 +44,12 @@ class SwitchBotController:
         ))  # Convert to int - seconds between taps
         
         # Log configuration at startup
-        logger.info(f"SwitchBot controller initialized:")
-        logger.info(f"  - Token configured: {'✅' if self.token else '❌'}")
-        logger.info(f"  - Secret configured: {'✅' if self.secret else '❌'}")
-        logger.info(f"  - Device name filter: {self.device_name or 'None (use first Bot found)'}")
-        logger.info(f"  - Min tap interval: {self.min_tap_interval} seconds ({self.min_tap_interval/60:.1f} minutes)")
-        logger.info(f"  - Rate limiting: {'✅' if self.min_tap_interval > 0 else '❌ DISABLED'}")
+        logger.debug(f"SwitchBot controller initialized:")
+        logger.debug(f"  - Token configured: {'✅' if self.token else '❌'}")
+        logger.debug(f"  - Secret configured: {'✅' if self.secret else '❌'}")
+        logger.debug(f"  - Device name filter: {self.device_name or 'None (use first Bot found)'}")
+        logger.debug(f"  - Min tap interval: {self.min_tap_interval} seconds ({self.min_tap_interval/60:.1f} minutes)")
+        logger.debug(f"  - Rate limiting: {'✅' if self.min_tap_interval > 0 else '❌ DISABLED'}")
 
     def _parse_error_code(self, error_message: str) -> int:
         """Extract HTTP status code from error message"""
@@ -109,7 +109,7 @@ class SwitchBotController:
             }
 
         try:
-            logger.info(f"Tapping screen with SwitchBot{'(FORCED)' if force else ''}...")
+            logger.debug(f"Tapping screen with SwitchBot{'(FORCED)' if force else ''}...")
             
             # Create fresh SwitchBot object each time (no caching)
             switchbot = SwitchBot(token=self.token, secret=self.secret)
@@ -124,12 +124,12 @@ class SwitchBotController:
                         # If device name specified, match by name/ID
                         if self.device_name in str(device):
                             target_device = device
-                            logger.info(f"Found specified SwitchBot device: {device}")
+                            logger.debug(f"Found specified SwitchBot device: {device}")
                             break
                     else:
                         # No device name specified, use first Bot found
                         target_device = device
-                        logger.info(f"Using first SwitchBot device: {device}")
+                        logger.debug(f"Using first SwitchBot device: {device}")
                         break
             
             if not target_device:
@@ -149,7 +149,7 @@ class SwitchBotController:
             self.last_successful_tap_time = current_time
             
             next_tap_time = current_time + self.min_tap_interval
-            logger.info(f"Screen tap completed - next tap allowed at {time.strftime('%H:%M:%S', time.localtime(next_tap_time))}")
+            logger.debug(f"Screen tap completed - next tap allowed at {time.strftime('%H:%M:%S', time.localtime(next_tap_time))}")
 
             return {
                 "success": True,

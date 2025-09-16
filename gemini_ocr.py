@@ -27,6 +27,10 @@ if not logging.root.handlers:
 
 logger = logging.getLogger(__name__)
 
+# Suppress verbose logging from google.genai.models
+logging.getLogger("google_genai.models").setLevel(logging.WARNING)
+logging.getLogger("google.genai.models").setLevel(logging.WARNING)
+
 class GeminiOCR:
     """Gemini-based OCR for battery percentage recognition"""
     
