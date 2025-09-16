@@ -72,3 +72,11 @@ The FastAPI application exposes:
 This is part of a home automation system alongside:
 - ESP32 Webcam hardware for LCD capture
 - Smart Switch Control (planned) for charging automation
+
+## Important Instructions for Claude Code
+
+When working with this repository:
+- **ALWAYS** commit and push changes to git after completing code modifications unless explicitly told not to
+- Prefer editing existing files over creating new ones
+- Do not create documentation files unless explicitly requested
+- Follow existing code patterns and conventions in the repository
