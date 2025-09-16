@@ -810,12 +810,7 @@ async def control_devices_based_on_battery(battery_percentage: int, force: bool 
             logger.error(f"Failed to control {device_name}")
     
     if success_count == total_devices:
-        # Log device changes if any occurred
-        if any(changed_devices.values()):
-            changes = [name for name, changed in changed_devices.items() if changed]
-            logger.info(f"⚡ Devices changed: {', '.join(changes)}")
-        else:
-            logger.debug(f"Devices unchanged (all {total_devices} already in correct state)")
+        logger.debug(f"Successfully controlled all {total_devices} devices")
         return True
     else:
         logger.warning(f"Only {success_count}/{total_devices} devices controlled successfully")
