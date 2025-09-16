@@ -821,11 +821,15 @@ async def background_worker():
     # Initialize database
     db = BatteryDatabase(os.getenv("DATABASE_PATH", "./data/battery_readings.db"))
     await db.init_db()
-    
+
     # Configuration
     polling_interval = int(os.getenv("POLLING_INTERVAL_SECONDS", 60))
-    confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 0.67))  # 2/3 majority
+    confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 1.0))  # Default to 100% confidence
     screen_tap_enabled = os.getenv("SCREEN_TAP_ENABLED", "true").lower() == "true"
+
+    # Cooldown configuration for 100% confidence readings
+    cooldown_seconds = int(os.getenv("OCR_COOLDOWN_SECONDS", 60))  # Default 60 second cooldown
+    last_perfect_reading_time = 0  # Track when we last got a 100% confidence reading
     
     # Reset startup sync flag on worker startup 
     await db.set_worker_state("startup_sync_complete", "false")
@@ -920,7 +924,16 @@ async def background_worker():
                 logger.debug("⏭️  Skipping OCR cycle as planned")
                 await asyncio.sleep(polling_interval)
                 continue
-                
+
+            # Check if we're in cooldown period after 100% confidence reading
+            current_time = time.time()
+            time_since_perfect = current_time - last_perfect_reading_time
+            if time_since_perfect < cooldown_seconds:
+                remaining_cooldown = cooldown_seconds - time_since_perfect
+                logger.debug(f"⏸️  In cooldown period after 100% confidence reading - {remaining_cooldown:.0f}s remaining")
+                await asyncio.sleep(polling_interval)
+                continue
+
             # If we get here, screen should be on - proceed with OCR
             logger.debug("🎯 Screen is ON - Starting Gemini OCR analysis with majority voting")
             start_time = time.time()
@@ -969,6 +982,11 @@ async def background_worker():
                         if "vote_distribution" in ocr_result and len(ocr_result['vote_distribution']) > 1:
                             vote_info = f" [{ocr_result['vote_distribution']}]"
                         logger.info(f"📊 {battery_percentage}% (conf: {confidence:.2f}){vote_info}")
+
+                        # If we got 100% confidence, start cooldown period
+                        if confidence >= 1.0:
+                            last_perfect_reading_time = time.time()
+                            logger.info(f"⏸️  Perfect confidence achieved - entering {cooldown_seconds}s cooldown period")
 
                         # Check if this is the first successful reading after startup
                         startup_sync_done = await db.get_worker_state("startup_sync_complete")
