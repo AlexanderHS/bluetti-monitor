@@ -129,8 +129,12 @@ class BatteryDatabase:
         is_filtered = False
         
         if confidence >= 0.8:  # Only apply median filter to high-confidence readings
-            filtered_percentage = await self.calculate_median_filtered_reading(battery_percentage, confidence)
-            is_filtered = (filtered_percentage != battery_percentage)
+            if confidence >= 1.0:  # Perfect confidence - trust immediately
+                filtered_percentage = battery_percentage
+                is_filtered = False
+            else:
+                filtered_percentage = await self.calculate_median_filtered_reading(battery_percentage, confidence)
+                is_filtered = (filtered_percentage != battery_percentage)
         
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
