@@ -683,14 +683,23 @@ def calculate_device_recommendations(battery_percentage: int) -> Dict:
     """
     Calculate device control recommendations based on battery percentage
     Alternates between output_1 and output_2 based on time to prevent circuit overload
-    
+
     Args:
         battery_percentage: Current battery percentage (0-100)
-        
+
     Returns:
         Dictionary with device recommendations and reasoning
     """
-    if battery_percentage < 10:
+    if battery_percentage == 0:
+        # Zero reading - likely an error state, turn everything off
+        recommendations = {
+            "input": "turn_off",
+            "output_1": "turn_off",
+            "output_2": "turn_off"
+        }
+        reasoning = "Battery at 0% - likely error state, turning everything off for safety"
+
+    elif battery_percentage < 10:
         # Below 10% - turn off outputs, turn on input (charge)
         recommendations = {
             "input": "turn_on",
