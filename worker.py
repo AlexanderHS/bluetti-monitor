@@ -459,6 +459,11 @@ async def groq_fallback_analysis_with_voting() -> Dict:
         # Calculate real confidence based on agreement
         confidence = winner_votes / total_valid_votes if total_valid_votes > 0 else 0
 
+        # Cap confidence at 0.5 for zero readings to prevent false zeros from being accepted
+        if winner_percentage == 0:
+            confidence = min(confidence, 0.5)
+            logger.debug("Zero reading detected - capping confidence at 0.5 to prevent false acceptance")
+
         # Accept if we have majority agreement (at least 2/3)
         if confidence >= 2/3:
             success = True
@@ -600,6 +605,11 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
 
         # Calculate real confidence based on agreement
         confidence = winner_votes / total_valid_votes if total_valid_votes > 0 else 0
+
+        # Cap confidence at 0.5 for zero readings to prevent false zeros from being accepted
+        if winner_percentage == 0:
+            confidence = min(confidence, 0.5)
+            logger.debug("Zero reading detected - capping confidence at 0.5 to prevent false acceptance")
 
         # Only accept if we have majority agreement (at least 2/3)
         if confidence >= 2/3:  # At least 2 out of 3 agree
