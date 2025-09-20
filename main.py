@@ -1,7 +1,7 @@
 import os
 import requests
 from urllib.parse import urljoin
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import uvicorn
@@ -513,17 +513,72 @@ async def capture_flip():
         if img is None:
             return {"error": "Failed to decode image"}
 
-        # Get crop coordinates, crop, and flip
+        # Get crop coordinates and crop
         coords = get_crop_coordinates()
-        cropped = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
-        flipped = cv2.flip(cropped, 1)  # Flip horizontally
+        result = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
+
+        # Apply flip based on environment variable
+        if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+            result = cv2.flip(result, 1)  # Flip horizontally
+
+        # Apply rotation based on environment variable
+        if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+            result = cv2.rotate(result, cv2.ROTATE_180)
 
         # Encode as JPEG and return
-        _, buffer = cv2.imencode(".jpg", flipped)
+        _, buffer = cv2.imencode(".jpg", result)
         return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
     except Exception as e:
         return {"error": f"Flip failed: {str(e)}"}
+
+
+@app.get("/capture/advanced")
+async def capture_advanced(
+    x1: int = Query(None, description="Left coordinate of crop area"),
+    y1: int = Query(None, description="Top coordinate of crop area"),
+    x2: int = Query(None, description="Right coordinate of crop area"),
+    y2: int = Query(None, description="Bottom coordinate of crop area"),
+    flip: bool = Query(None, description="Flip image horizontally"),
+    rotate: bool = Query(None, description="Rotate image 180 degrees")
+):
+    """Advanced capture endpoint with customizable crop and transformations"""
+    try:
+        # Capture and decode image
+        image_bytes = capture_image()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return {"error": "Failed to decode image"}
+
+        # Use provided coordinates or defaults
+        if x1 is not None and y1 is not None and x2 is not None and y2 is not None:
+            # Use provided coordinates
+            result = img[y1:y2, x1:x2]
+        else:
+            # Use default crop coordinates
+            coords = get_crop_coordinates()
+            result = img[coords["y1"]:coords["y2"], coords["x1"]:coords["x2"]]
+
+        # Apply flip if requested (or use env default if not specified)
+        if flip is None:
+            flip = os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true"
+        if flip:
+            result = cv2.flip(result, 1)  # Flip horizontally
+
+        # Apply rotation if requested (or use env default if not specified)
+        if rotate is None:
+            rotate = os.getenv("IMAGE_ROTATE_180", "false").lower() == "true"
+        if rotate:
+            result = cv2.rotate(result, cv2.ROTATE_180)
+
+        # Encode as JPEG and return
+        _, buffer = cv2.imencode(".jpg", result)
+        return Response(content=buffer.tobytes(), media_type="image/jpeg")
+
+    except Exception as e:
+        return {"error": f"Advanced capture failed: {str(e)}"}
 
 
 @app.get("/capture/ocr")
@@ -548,14 +603,19 @@ async def capture_ocr():
                 "screen_analysis": screen_analysis,
             }
 
-        # Get crop coordinates, crop, and flip
+        # Get crop coordinates and crop
         coords = get_crop_coordinates()
-        cropped = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
-        flipped = cv2.flip(cropped, 1)
+        result = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
+
+        # Apply transformations based on environment variables
+        if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+            result = cv2.flip(result, 1)  # Flip horizontally
+        if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+            result = cv2.rotate(result, cv2.ROTATE_180)
 
         # Apply the optimal preprocessing we found through testing
         # Convert to grayscale and upscale (raw preprocessing works best)
-        gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
         height, width = gray.shape
         upscaled = cv2.resize(
             gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
@@ -647,15 +707,20 @@ async def capture_processed(method: str = "enhanced"):
         if screen_analysis.get("screen_state") == "off":
             return {"error": "Screen is off - no preprocessing to show"}
 
-        # Get crop coordinates, crop, and flip
+        # Get crop coordinates and crop
         coords = get_crop_coordinates()
-        cropped = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
-        flipped = cv2.flip(cropped, 1)
+        result = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
+
+        # Apply transformations based on environment variables
+        if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+            result = cv2.flip(result, 1)  # Flip horizontally
+        if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+            result = cv2.rotate(result, cv2.ROTATE_180)
 
         # Let's debug step by step
         if method == "raw":
             # Just the cropped and flipped image, upscaled
-            gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
             processed = cv2.resize(
                 gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
@@ -663,15 +728,15 @@ async def capture_processed(method: str = "enhanced"):
 
         elif method == "blue_channel":
             # Try using just the blue channel (white text on blue background)
-            height, width = flipped.shape[:2]
-            blue_channel = flipped[:, :, 0]  # Blue channel in BGR
+            height, width = result.shape[:2]
+            blue_channel = result[:, :, 0]  # Blue channel in BGR
             processed = cv2.resize(
                 blue_channel, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
             )
 
         elif method == "enhanced":
             # Show the enhanced version before thresholding
-            gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
             resized = cv2.resize(
                 gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
@@ -682,7 +747,7 @@ async def capture_processed(method: str = "enhanced"):
 
         elif method == "invert":
             # Simple invert of enhanced image
-            gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
             resized = cv2.resize(
                 gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
@@ -694,7 +759,7 @@ async def capture_processed(method: str = "enhanced"):
 
         # Thresholding methods
         else:
-            gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
             resized = cv2.resize(
                 gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
@@ -758,28 +823,33 @@ async def capture_threshold(
         if screen_analysis.get("screen_state") == "off":
             return {"error": "Screen is off - no thresholding to show"}
 
-        # Get crop coordinates, crop, and flip
+        # Get crop coordinates and crop
         coords = get_crop_coordinates()
-        cropped = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
-        flipped = cv2.flip(cropped, 1)
+        result = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
+
+        # Apply transformations based on environment variables
+        if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+            result = cv2.flip(result, 1)  # Flip horizontally
+        if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+            result = cv2.rotate(result, cv2.ROTATE_180)
 
         # Apply requested preprocessing
         if preprocess == "raw":
-            gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
             processed_img = cv2.resize(
                 gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
             )
 
         elif preprocess == "blue_channel":
-            height, width = flipped.shape[:2]
-            blue_channel = flipped[:, :, 0]  # Blue channel
+            height, width = result.shape[:2]
+            blue_channel = result[:, :, 0]  # Blue channel
             processed_img = cv2.resize(
                 blue_channel, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
             )
 
         elif preprocess == "enhanced":
-            gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
             resized = cv2.resize(
                 gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
@@ -836,13 +906,18 @@ async def capture_ocr_debug(threshold: int = 160):
                 "message": "Screen is off - OCR debug skipped",
             }
 
-        # Get crop coordinates, crop, and flip
+        # Get crop coordinates and crop
         coords = get_crop_coordinates()
-        cropped = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
-        flipped = cv2.flip(cropped, 1)
+        result = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
+
+        # Apply transformations based on environment variables
+        if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+            result = cv2.flip(result, 1)  # Flip horizontally
+        if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+            result = cv2.rotate(result, cv2.ROTATE_180)
 
         # Apply preprocessing with specified threshold
-        gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
         height, width = gray.shape
         upscaled = cv2.resize(
             gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
@@ -975,11 +1050,17 @@ async def capture_ocr_advanced():
                     )
                     continue
 
-                # Get crop coordinates, crop, and flip
+                # Get crop coordinates and crop
                 coords = get_crop_coordinates()
-                cropped = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
-                flipped = cv2.flip(cropped, 1)
-                gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+                result = img[coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]]
+
+                # Apply transformations based on environment variables
+                if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+                    result = cv2.flip(result, 1)  # Flip horizontally
+                if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+                    result = cv2.rotate(result, cv2.ROTATE_180)
+
+                gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
                 height, width = gray.shape
                 upscaled = cv2.resize(
                     gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC
@@ -1298,11 +1379,17 @@ async def capture_and_analyze():
                     if img is not None:
                         # Use the same OCR logic
                         coords = get_crop_coordinates()
-                        cropped = img[
+                        result = img[
                             coords["y1"] : coords["y2"], coords["x1"] : coords["x2"]
                         ]
-                        flipped = cv2.flip(cropped, 1)
-                        gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+
+                        # Apply transformations based on environment variables
+                        if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+                            result = cv2.flip(result, 1)  # Flip horizontally
+                        if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+                            result = cv2.rotate(result, cv2.ROTATE_180)
+
+                        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
                         height, width = gray.shape
                         upscaled = cv2.resize(
                             gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC

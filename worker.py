@@ -302,10 +302,16 @@ def process_single_ocr_task(args: Tuple) -> Optional[int]:
             # Handle corrupted JPEG data silently
             return None
         
-        # Crop and flip
-        cropped = img[crop_coords['y1']:crop_coords['y2'], crop_coords['x1']:crop_coords['x2']]
-        flipped = cv2.flip(cropped, 1)
-        gray = cv2.cvtColor(flipped, cv2.COLOR_BGR2GRAY)
+        # Crop image
+        result = img[crop_coords['y1']:crop_coords['y2'], crop_coords['x1']:crop_coords['x2']]
+
+        # Apply transformations based on environment variables
+        if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+            result = cv2.flip(result, 1)  # Flip horizontally
+        if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+            result = cv2.rotate(result, cv2.ROTATE_180)
+
+        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
         height, width = gray.shape
         upscaled = cv2.resize(gray, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC)
         
@@ -354,13 +360,18 @@ def capture_and_process_image_for_gemini():
     if img is None:
         raise Exception("Failed to decode image from ESP32")
     
-    # Get crop coordinates, crop, and flip (same as /capture/flip endpoint)
+    # Get crop coordinates and crop (same as /capture/flip endpoint)
     coords = get_crop_coordinates()
-    cropped = img[coords['y1']:coords['y2'], coords['x1']:coords['x2']]
-    flipped = cv2.flip(cropped, 1)  # Flip horizontally
-    
+    result = img[coords['y1']:coords['y2'], coords['x1']:coords['x2']]
+
+    # Apply transformations based on environment variables
+    if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+        result = cv2.flip(result, 1)  # Flip horizontally
+    if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+        result = cv2.rotate(result, cv2.ROTATE_180)
+
     # Encode as JPEG
-    _, buffer = cv2.imencode('.jpg', flipped)
+    _, buffer = cv2.imencode('.jpg', result)
     return buffer.tobytes()
 
 async def groq_fallback_analysis_with_voting() -> Dict:
