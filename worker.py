@@ -895,13 +895,24 @@ async def background_worker():
             if screen_analysis.get("screen_state") == "off":
                 consecutive_screen_off_count += 1
                 logger.debug(f"Screen is off (count: {consecutive_screen_off_count})")
-                
-                # Check if we should bypass SwitchBot due to consecutive failures
+
+                # Check if we should enter safe shutdown mode due to consecutive SwitchBot failures
                 if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
-                    logger.warning(f"🚨 SwitchBot bypass mode activated - {consecutive_switchbot_failures} consecutive failures, attempting OCR anyway")
-                    # Continue to OCR even though screen appears off
-                    consecutive_screen_off_count = 0  # Reset to prevent further tap attempts
-                    
+                    logger.critical(f"🚨 SwitchBot failure threshold reached - {consecutive_switchbot_failures} consecutive failures")
+                    logger.critical("⚠️  Cannot reliably tap screen - entering SAFE SHUTDOWN mode")
+                    logger.critical("🔌 Turning off all devices (input, output_1, output_2) to prevent damage from false readings")
+
+                    # Turn off all devices for safety - we can't trust any readings without screen control
+                    await control_device("input", False, force=True)
+                    await control_device("output_1", False, force=True)
+                    await control_device("output_2", False, force=True)
+
+                    logger.info("✅ Safe shutdown complete - all devices turned off")
+                    logger.info("💡 Tip: Check SwitchBot connectivity and configuration")
+
+                    # Skip OCR entirely - we can't trust readings without screen control
+                    should_skip_ocr = True
+
                 # If screen has been off for multiple cycles and tapping is enabled, try to turn it on
                 elif (screen_tap_enabled and 
                     consecutive_screen_off_count >= max_screen_off_before_tap and
