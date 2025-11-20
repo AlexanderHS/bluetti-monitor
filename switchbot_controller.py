@@ -39,17 +39,69 @@ class SwitchBotController:
         self.device_name = os.getenv("SWITCH_BOT_DEVICE_NAME")  # Optional device selector
         self.last_tap_time = 0  # Track last tap timestamp for rate limiting
         self.last_successful_tap_time = 0  # Track last successful tap for suicide logic
+        
+        # Legacy fallback - if SWITCH_BOT_SECONDS_BETWEEN_TAPS is set, use it for all times
         self.min_tap_interval = int(os.getenv(
-            "SWITCH_BOT_SECONDS_BETWEEN_TAPS", 15 * 60
-        ))  # Convert to int - seconds between taps
+            "SWITCH_BOT_SECONDS_BETWEEN_TAPS", 0
+        ))  # Legacy setting - 0 means use dynamic intervals
+        
+        # Time-of-day based tap intervals (in seconds)
+        self.daytime_interval = int(os.getenv("DAYTIME_TAP_INTERVAL", 300))  # 5 minutes
+        self.shoulder_interval = int(os.getenv("SHOULDER_TAP_INTERVAL", 900))  # 15 minutes
+        self.nighttime_interval = int(os.getenv("NIGHTTIME_TAP_INTERVAL", 1800))  # 30 minutes
+        
+        # Time ranges (24-hour format)
+        self.night_start_hour = int(os.getenv("NIGHT_START_HOUR", 22))  # 10 PM
+        self.night_end_hour = int(os.getenv("NIGHT_END_HOUR", 6))  # 6 AM
+        self.shoulder_morning_start = int(os.getenv("SHOULDER_MORNING_START", 6))  # 6 AM
+        self.shoulder_morning_end = int(os.getenv("SHOULDER_MORNING_END", 8))  # 8 AM
+        self.shoulder_evening_start = int(os.getenv("SHOULDER_EVENING_START", 20))  # 8 PM
+        self.shoulder_evening_end = int(os.getenv("SHOULDER_EVENING_END", 22))  # 10 PM
         
         # Log configuration at startup
         logger.debug(f"SwitchBot controller initialized:")
         logger.debug(f"  - Token configured: {'✅' if self.token else '❌'}")
         logger.debug(f"  - Secret configured: {'✅' if self.secret else '❌'}")
         logger.debug(f"  - Device name filter: {self.device_name or 'None (use first Bot found)'}")
-        logger.debug(f"  - Min tap interval: {self.min_tap_interval} seconds ({self.min_tap_interval/60:.1f} minutes)")
-        logger.debug(f"  - Rate limiting: {'✅' if self.min_tap_interval > 0 else '❌ DISABLED'}")
+        
+        if self.min_tap_interval > 0:
+            logger.debug(f"  - Using LEGACY fixed interval: {self.min_tap_interval} seconds ({self.min_tap_interval/60:.1f} minutes)")
+        else:
+            logger.debug(f"  - Using DYNAMIC time-of-day intervals:")
+            logger.debug(f"    • Daytime: {self.daytime_interval}s ({self.daytime_interval/60:.1f} min)")
+            logger.debug(f"    • Shoulder: {self.shoulder_interval}s ({self.shoulder_interval/60:.1f} min)")
+            logger.debug(f"    • Nighttime: {self.nighttime_interval}s ({self.nighttime_interval/60:.1f} min)")
+            logger.debug(f"    • Night hours: {self.night_start_hour}:00 - {self.night_end_hour}:00")
+
+    def get_dynamic_tap_interval(self) -> int:
+        """
+        Calculate tap interval based on time of day.
+        
+        Returns:
+            int: Seconds until next tap is allowed based on current time
+        """
+        # If legacy fixed interval is set, use it
+        if self.min_tap_interval > 0:
+            return self.min_tap_interval
+        
+        from datetime import datetime
+        current_hour = datetime.now().hour
+        
+        # Night hours (default: 10 PM - 6 AM): Longest interval
+        if self.night_start_hour <= current_hour or current_hour < self.night_end_hour:
+            return self.nighttime_interval
+        
+        # Morning shoulder (default: 6-8 AM): Medium interval
+        elif self.shoulder_morning_start <= current_hour < self.shoulder_morning_end:
+            return self.shoulder_interval
+        
+        # Evening shoulder (default: 8-10 PM): Medium interval
+        elif self.shoulder_evening_start <= current_hour < self.shoulder_evening_end:
+            return self.shoulder_interval
+        
+        # Day hours (default: 8 AM - 8 PM): Shortest interval
+        else:
+            return self.daytime_interval
 
     def _parse_error_code(self, error_message: str) -> int:
         """Extract HTTP status code from error message"""
@@ -62,13 +114,14 @@ class SwitchBotController:
             return 0  # Unknown error
 
     def get_time_until_next_tap(self) -> float:
-        """Get time in seconds until next tap is allowed"""
+        """Get time in seconds until next tap is allowed (uses dynamic interval)"""
         current_time = time.time()
         time_since_last_tap = current_time - self.last_tap_time
-        return max(0, self.min_tap_interval - time_since_last_tap)
+        required_interval = self.get_dynamic_tap_interval()
+        return max(0, required_interval - time_since_last_tap)
 
     def can_tap_screen(self) -> bool:
-        """Check if enough time has passed since last tap (15 minute minimum)"""
+        """Check if enough time has passed since last tap (uses dynamic interval based on time of day)"""
         return self.get_time_until_next_tap() == 0
 
     async def tap_screen(self, force: bool = False) -> dict:
