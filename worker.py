@@ -647,10 +647,49 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
             "total_attempts": 3
         }
 
+def get_device_states():
+    """
+    Query device states from the device control API
+
+    Returns:
+        dict: Dictionary with device states, e.g., {"input": False, "output_2": True}
+              Returns empty dict on error
+    """
+    control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
+    control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
+    devices_url = f"http://{control_api_host}:{control_api_port}/devices"
+
+    try:
+        response = requests.get(
+            devices_url,
+            headers={"accept": "application/json"},
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            devices = data.get("devices", [])
+
+            # Extract states for input and output_2
+            states = {}
+            for device in devices:
+                name = device.get("name")
+                if name in ["input", "output_2"]:
+                    states[name] = device.get("known_state", False)
+
+            return states
+        else:
+            logger.warning(f"Failed to get device states: HTTP {response.status_code}")
+            return {}
+
+    except Exception as e:
+        logger.warning(f"Error getting device states: {e}")
+        return {}
+
 async def control_device(device_name: str, turn_on: bool, force: bool = False):
     """
     Control a device via the device control API
-    
+
     Args:
         device_name: Name of the device (e.g., "input", "output_1", "output_2")
         turn_on: True to turn on, False to turn off
@@ -659,13 +698,13 @@ async def control_device(device_name: str, turn_on: bool, force: bool = False):
     control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
     control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
     control_url = f"http://{control_api_host}:{control_api_port}/device/control"
-    
+
     payload = {
         "device_name": device_name,
         "turn_on": turn_on,
         "force": force
     }
-    
+
     try:
         response = requests.post(
             control_url,
@@ -676,14 +715,14 @@ async def control_device(device_name: str, turn_on: bool, force: bool = False):
             },
             timeout=10
         )
-        
+
         if response.status_code == 200:
             logger.debug(f"Successfully controlled device {device_name}: {'on' if turn_on else 'off'}")
             return True
         else:
             logger.error(f"Failed to control device {device_name}: HTTP {response.status_code}")
             return False
-            
+
     except Exception as e:
         logger.error(f"Error controlling device {device_name}: {e}")
         return False
@@ -899,50 +938,58 @@ async def background_worker():
                     should_skip_ocr = True
 
                 # If screen has been off for multiple cycles and tapping is enabled, try to turn it on
-                elif (screen_tap_enabled and 
-                    consecutive_screen_off_count >= max_screen_off_before_tap and
-                    switchbot_controller.can_tap_screen()):  # Check rate limit
-                    
-                    logger.debug(f"Screen has been off for {consecutive_screen_off_count} cycles, attempting to tap it on")
-                    
-                    tap_result = await switchbot_controller.tap_screen()
-                    if tap_result.get("success"):
-                        # Reset failure counter on successful tap
-                        consecutive_switchbot_failures = 0
-                        consecutive_screen_off_count = 0
-                        
-                        # Wait a moment for screen to turn on, then retry
-                        await asyncio.sleep(3)
-                        
-                        # Re-check screen state after tapping
-                        test_image = capture_image()
-                        screen_analysis = analyze_screen_state(test_image)
-                        
-                        if screen_analysis.get("screen_state") == "on":
-                            logger.debug("Successfully turned screen on with SwitchBot tap!")
-                            # Screen is now on, continue to OCR processing below
+                elif (screen_tap_enabled and
+                    consecutive_screen_off_count >= max_screen_off_before_tap):
+
+                    # Query device states to determine appropriate tap interval
+                    device_states = get_device_states()
+                    input_on = device_states.get("input", False)
+                    output_on = device_states.get("output_2", False)
+
+                    # Check rate limit with device states
+                    if switchbot_controller.can_tap_screen(input_on=input_on, output_on=output_on):
+                        logger.debug(f"Screen has been off for {consecutive_screen_off_count} cycles, attempting to tap it on")
+
+                        tap_result = await switchbot_controller.tap_screen()
+                        if tap_result.get("success"):
+                            # Reset failure counter on successful tap
+                            consecutive_switchbot_failures = 0
+                            consecutive_screen_off_count = 0
+
+                            # Wait a moment for screen to turn on, then retry
+                            await asyncio.sleep(3)
+
+                            # Re-check screen state after tapping
+                            test_image = capture_image()
+                            screen_analysis = analyze_screen_state(test_image)
+
+                            if screen_analysis.get("screen_state") == "on":
+                                logger.debug("Successfully turned screen on with SwitchBot tap!")
+                                # Screen is now on, continue to OCR processing below
+                            else:
+                                logger.debug("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
+                                should_skip_ocr = True
                         else:
-                            logger.debug("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
+                            # SwitchBot tap failed - increment failure counter
+                            consecutive_switchbot_failures += 1
+                            error_msg = tap_result.get('error', 'Unknown error')
+                            logger.error(f"SwitchBot tap failed ({consecutive_switchbot_failures}/{max_switchbot_failures_before_bypass}): {error_msg}")
+
+                            # Modern error handling is now done in the SwitchBot controller
+                            # Error recovery happens automatically in tap_screen()
+
+                            if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
+                                logger.error(f"🚨 SwitchBot failure threshold reached - will bypass screen tapping on next cycle")
+
                             should_skip_ocr = True
                     else:
-                        # SwitchBot tap failed - increment failure counter
-                        consecutive_switchbot_failures += 1
-                        error_msg = tap_result.get('error', 'Unknown error')
-                        logger.error(f"SwitchBot tap failed ({consecutive_switchbot_failures}/{max_switchbot_failures_before_bypass}): {error_msg}")
-                        
-                        # Modern error handling is now done in the SwitchBot controller
-                        # Error recovery happens automatically in tap_screen()
-                        
-                        if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
-                            logger.error(f"🚨 SwitchBot failure threshold reached - will bypass screen tapping on next cycle")
-                        
+                        # Rate limited - log and skip
+                        time_until_next = switchbot_controller.get_time_until_next_tap(input_on=input_on, output_on=output_on)
+                        logger.debug(f"Screen tap rate limited - {time_until_next/60:.1f} min until next tap - SKIPPING OCR")
                         should_skip_ocr = True
                 else:
-                    # Screen is off but we haven't reached the tap threshold yet, or rate limited
-                    if screen_tap_enabled and consecutive_screen_off_count >= max_screen_off_before_tap:
-                        logger.debug("Screen tap rate limited - waiting for next allowed tap window - SKIPPING OCR")
-                    else:
-                        logger.debug(f"Screen off, waiting for {max_screen_off_before_tap - consecutive_screen_off_count} more cycles before tapping - SKIPPING OCR")
+                    # Screen is off but we haven't reached the tap threshold yet
+                    logger.debug(f"Screen off, waiting for {max_screen_off_before_tap - consecutive_screen_off_count} more cycles before tapping - SKIPPING OCR")
                     should_skip_ocr = True
             else:
                 # Screen is on, reset the counter

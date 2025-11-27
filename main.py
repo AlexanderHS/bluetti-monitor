@@ -1456,12 +1456,57 @@ async def capture_and_analyze():
     }
 
 
+def get_device_states():
+    """
+    Query device states from the device control API
+
+    Returns:
+        dict: Dictionary with device states, e.g., {"input": False, "output_2": True}
+              Returns empty dict on error
+    """
+    control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
+    control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
+    devices_url = f"http://{control_api_host}:{control_api_port}/devices"
+
+    try:
+        response = requests.get(
+            devices_url,
+            headers={"accept": "application/json"},
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            devices = data.get("devices", [])
+
+            # Extract states for input and output_2
+            states = {}
+            for device in devices:
+                name = device.get("name")
+                if name in ["input", "output_2"]:
+                    states[name] = device.get("known_state", False)
+
+            return states
+        else:
+            logger.warning(f"Failed to get device states: HTTP {response.status_code}")
+            return {}
+
+    except Exception as e:
+        logger.warning(f"Error getting device states: {e}")
+        return {}
+
+
 @app.get("/switchbot/status")
 async def get_switchbot_status():
     """Get SwitchBot controller status and rate limiting info"""
     try:
-        status = await switchbot_controller.get_status()
-        return {"success": True, **status}
+        # Query device states to provide accurate interval info
+        device_states = get_device_states()
+        input_on = device_states.get("input", False)
+        output_on = device_states.get("output_2", False)
+
+        status = await switchbot_controller.get_status(input_on=input_on, output_on=output_on)
+        return {"success": True, "device_states": device_states, **status}
     except Exception as e:
         return {"success": False, "error": f"Failed to get SwitchBot status: {str(e)}"}
 
