@@ -901,7 +901,7 @@ async def background_worker():
     max_screen_off_before_tap = 2  # Tap after 2 consecutive "screen off" detections
     consecutive_switchbot_failures = 0
     max_switchbot_failures_before_bypass = 5  # Bypass screen tapping after 5 consecutive failures
-    max_failure_hours = int(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 1))
+    max_failure_hours = float(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 0.25))  # Default 15 minutes
 
     # Track monitoring mode for change detection
     last_monitoring_mode = None  # "active" or "idle"
@@ -1019,13 +1019,25 @@ async def background_worker():
                                 logger.debug("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
                                 should_skip_ocr = True
                         else:
-                            # SwitchBot tap failed - increment failure counter
+                            # SwitchBot tap failed - increment failure counter and log details
                             consecutive_switchbot_failures += 1
                             error_msg = tap_result.get('error', 'Unknown error')
-                            logger.error(f"SwitchBot tap failed ({consecutive_switchbot_failures}/{max_switchbot_failures_before_bypass}): {error_msg}")
+                            error_details = tap_result.get('details', '')
+                            error_code = tap_result.get('error_code', 0)
 
-                            # Modern error handling is now done in the SwitchBot controller
-                            # Error recovery happens automatically in tap_screen()
+                            # Build detailed error message
+                            full_error = f"{error_msg}"
+                            if error_details:
+                                full_error += f" - {error_details}"
+                            if error_code:
+                                full_error += f" (HTTP {error_code})"
+
+                            logger.error(f"SwitchBot tap failed ({consecutive_switchbot_failures}/{max_switchbot_failures_before_bypass}): {full_error}")
+
+                            # Log additional diagnostic info on first few failures
+                            if consecutive_switchbot_failures <= 2:
+                                logger.error(f"  Device states: input={'ON' if input_on else 'OFF'}, output={'ON' if output_on else 'OFF'}")
+                                logger.error(f"  Monitoring mode: {current_mode}")
 
                             if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
                                 logger.error(f"🚨 SwitchBot failure threshold reached - will bypass screen tapping on next cycle")

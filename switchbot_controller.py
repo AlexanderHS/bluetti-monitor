@@ -248,7 +248,7 @@ class SwitchBotController:
     
     def check_suicide_condition(self) -> dict:
         """Check if container should exit due to prolonged SwitchBot failures"""
-        max_failure_hours = int(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 1))
+        max_failure_hours = float(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 0.25))  # Default 15 minutes
         max_failure_seconds = max_failure_hours * 3600
         current_time = time.time()
         
