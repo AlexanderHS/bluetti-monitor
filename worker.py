@@ -906,6 +906,10 @@ async def background_worker():
     # Track monitoring mode for change detection
     last_monitoring_mode = None  # "active" or "idle"
 
+    # Track safe shutdown state to prevent log spam
+    in_safe_shutdown = False
+    safe_shutdown_last_log_time = 0
+
     # Log SwitchBot configuration details
     logger.debug(f"SwitchBot resilience configuration:")
     logger.debug(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
@@ -952,16 +956,32 @@ async def background_worker():
 
                 # Check if we should enter safe shutdown mode due to consecutive SwitchBot failures
                 if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
-                    logger.critical(f"🚨 SwitchBot failure threshold reached - {consecutive_switchbot_failures} consecutive failures")
-                    logger.critical("⚠️  Cannot reliably tap screen - entering SAFE SHUTDOWN mode")
-                    logger.critical("🔌 Turning off all devices (input, output_2) to prevent damage from false readings")
+                    # Only log on first entry or every 10 minutes to avoid spam
+                    current_time = time.time()
+                    should_log = not in_safe_shutdown or (current_time - safe_shutdown_last_log_time) >= 600
 
-                    # Turn off all devices for safety - we can't trust any readings without screen control
-                    await control_device("input", False, force=True)
-                    await control_device("output_2", False, force=True)
+                    if should_log:
+                        if not in_safe_shutdown:
+                            logger.critical(f"🚨 SwitchBot failure threshold reached - {consecutive_switchbot_failures} consecutive failures")
+                            logger.critical("⚠️  Cannot reliably tap screen - entering SAFE SHUTDOWN mode")
+                        else:
+                            logger.critical(f"⚠️  Still in SAFE SHUTDOWN mode - SwitchBot unreliable for {(current_time - safe_shutdown_last_log_time) / 60:.0f} minutes")
 
-                    logger.info("✅ Safe shutdown complete - all devices turned off")
-                    logger.info("💡 Tip: Check SwitchBot connectivity and configuration")
+                        logger.critical("🔌 Turning off all devices (input, output_2) to prevent damage from false readings")
+
+                        # Turn off all devices for safety - we can't trust any readings without screen control
+                        await control_device("input", False, force=True)
+                        await control_device("output_2", False, force=True)
+
+                        logger.info("✅ Safe shutdown complete - all devices turned off")
+                        logger.info("💡 Tip: Check SwitchBot connectivity and configuration")
+
+                        safe_shutdown_last_log_time = current_time
+                        in_safe_shutdown = True
+                    else:
+                        # Still in safe shutdown but not logging - just turn off devices silently
+                        await control_device("input", False, force=True)
+                        await control_device("output_2", False, force=True)
 
                     # Skip OCR entirely - we can't trust readings without screen control
                     should_skip_ocr = True
@@ -979,6 +999,11 @@ async def background_worker():
                             # Reset failure counter on successful tap
                             consecutive_switchbot_failures = 0
                             consecutive_screen_off_count = 0
+
+                            # Exit safe shutdown mode if we were in it
+                            if in_safe_shutdown:
+                                logger.info("✅ Exiting SAFE SHUTDOWN mode - SwitchBot working again")
+                                in_safe_shutdown = False
 
                             # Wait a moment for screen to turn on, then retry
                             await asyncio.sleep(3)
@@ -1016,8 +1041,11 @@ async def background_worker():
                     logger.debug(f"Screen off, waiting for {max_screen_off_before_tap - consecutive_screen_off_count} more cycles before tapping - SKIPPING OCR")
                     should_skip_ocr = True
             else:
-                # Screen is on, reset the counter
+                # Screen is on, reset the counter and exit safe shutdown
                 consecutive_screen_off_count = 0
+                if in_safe_shutdown:
+                    logger.info("✅ Exiting SAFE SHUTDOWN mode - screen is back on")
+                    in_safe_shutdown = False
                 logger.debug("Screen detected as ON")
                 
             # Check if we should skip OCR
