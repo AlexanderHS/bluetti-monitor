@@ -910,6 +910,9 @@ async def background_worker():
     in_safe_shutdown = False
     safe_shutdown_last_log_time = 0
 
+    # Track consecutive 100% readings to filter false positives
+    consecutive_100_readings = 0
+
     # Log SwitchBot configuration details
     logger.debug(f"SwitchBot resilience configuration:")
     logger.debug(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
@@ -1084,11 +1087,27 @@ async def background_worker():
             if ocr_result["success"]:
                 battery_percentage = ocr_result["battery_percentage"]
                 confidence = ocr_result["confidence"]
-                
+
                 if confidence >= confidence_threshold:
                     # Check plausibility against last reading
                     should_store = True
                     plausibility_msg = ""
+
+                    # Special handling for 100% readings to filter false positives
+                    # Require 3 consecutive 100% readings before believing it
+                    if battery_percentage == 100:
+                        consecutive_100_readings += 1
+                        if consecutive_100_readings < 3:
+                            should_store = False
+                            plausibility_msg = f"100% reading #{consecutive_100_readings}/3 - waiting for confirmation"
+                            logger.info(f"⚠️ 100% reading #{consecutive_100_readings}/3 ignored - need 3 consecutive to confirm")
+                        else:
+                            logger.info(f"✅ 100% reading CONFIRMED after {consecutive_100_readings} consecutive reads")
+                    else:
+                        # Reset counter when we see non-100% reading
+                        if consecutive_100_readings > 0:
+                            logger.debug(f"Reset consecutive 100% counter (was {consecutive_100_readings})")
+                        consecutive_100_readings = 0
                     
                     try:
                         last_readings = await db.get_recent_readings(limit=1)
