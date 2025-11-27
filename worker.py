@@ -902,15 +902,44 @@ async def background_worker():
     consecutive_switchbot_failures = 0
     max_switchbot_failures_before_bypass = 5  # Bypass screen tapping after 5 consecutive failures
     max_failure_hours = int(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 1))
-    
+
+    # Track monitoring mode for change detection
+    last_monitoring_mode = None  # "active" or "idle"
+
     # Log SwitchBot configuration details
     logger.debug(f"SwitchBot resilience configuration:")
     logger.debug(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
     logger.debug(f"  - Emergency bypass after: {max_switchbot_failures_before_bypass} consecutive failures")
     logger.debug(f"  - Fresh object creation: Every tap creates new SwitchBot API object")
-    
+
     while True:
         try:
+            # Query device states and check monitoring mode at start of each cycle
+            device_states = get_device_states()
+            input_on = device_states.get("input", False)
+            output_on = device_states.get("output_2", False)
+            is_daylight = switchbot_controller._is_daylight_hours()
+
+            # Determine current monitoring mode
+            mode_factors = []
+            if input_on:
+                mode_factors.append("input ON")
+            if output_on:
+                mode_factors.append("output ON")
+            if is_daylight:
+                mode_factors.append("daylight hours")
+
+            current_mode = "active" if mode_factors else "idle"
+
+            # Log mode changes at INFO level
+            if last_monitoring_mode != current_mode:
+                interval = switchbot_controller.active_interval if current_mode == "active" else switchbot_controller.idle_interval
+                if current_mode == "active":
+                    logger.info(f"🔄 Switched to ACTIVE monitoring ({interval/60:.0f} min taps): {', '.join(mode_factors)}")
+                else:
+                    logger.info(f"💤 Switched to IDLE monitoring ({interval/60:.0f} min taps): nighttime, all devices OFF")
+                last_monitoring_mode = current_mode
+
             # Check if screen is on (capture directly from ESP32 for screen analysis)
             test_image = capture_image()
             screen_analysis = analyze_screen_state(test_image)
@@ -941,12 +970,7 @@ async def background_worker():
                 elif (screen_tap_enabled and
                     consecutive_screen_off_count >= max_screen_off_before_tap):
 
-                    # Query device states to determine appropriate tap interval
-                    device_states = get_device_states()
-                    input_on = device_states.get("input", False)
-                    output_on = device_states.get("output_2", False)
-
-                    # Check rate limit with device states
+                    # Check rate limit with device states (already queried at start of loop)
                     if switchbot_controller.can_tap_screen(input_on=input_on, output_on=output_on):
                         logger.debug(f"Screen has been off for {consecutive_screen_off_count} cycles, attempting to tap it on")
 
