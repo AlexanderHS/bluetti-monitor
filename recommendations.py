@@ -40,23 +40,14 @@ def calculate_device_recommendations(battery_percentage: int) -> Dict:
         }
         reasoning = f"Battery at {battery_percentage}% - low, conserving power"
 
-    elif 60 <= battery_percentage < 80:
-        # Between 60-80% - turn off input, turn on one output (moderate drain)
-        recommendations = {
-            "input": "turn_off",
-            "output_1": "turn_on",
-            "output_2": "turn_off",
-        }
-        reasoning = f"Battery at {battery_percentage}% - moderate level, using one output for moderate drain"
-
-    else:  # battery_percentage >= 80
-        # Above 80% - turn off input, turn on both outputs (rapid drain)
+    else:  # battery_percentage >= 60
+        # Above 60% - turn off input, turn on output_2
         recommendations = {
             "input": "turn_off",
             "output_1": "turn_off",
             "output_2": "turn_on",
         }
-        reasoning = f"Battery at {battery_percentage}% - high level, using both outputs for rapid drain"
+        reasoning = f"Battery at {battery_percentage}% - good level, using output_2"
 
     return {"recommendations": recommendations, "reasoning": reasoning}
 

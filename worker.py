@@ -739,27 +739,13 @@ def calculate_device_recommendations(battery_percentage: int) -> Dict:
         reasoning = f"Battery at {battery_percentage}% - low, conserving power"
         
     else:  # battery_percentage >= 60
-        # Above 60% - turn off input, turn on ONE output (alternating by time to prevent circuit overload)
-        current_minute = datetime.now().minute
-        
-        if current_minute < 30:
-            # First half hour: use output_1
-            recommendations = {
-                "input": "turn_off",
-                "output_1": "turn_on",
-                "output_2": "turn_off"
-            }
-            active_output = "output_1"
-        else:
-            # Second half hour: use output_2
-            recommendations = {
-                "input": "turn_off",
-                "output_1": "turn_off",
-                "output_2": "turn_on"
-            }
-            active_output = "output_2"
-        
-        reasoning = f"Battery at {battery_percentage}% - good level, using {active_output} (alternating by time to prevent circuit overload)"
+        # Above 60% - turn off input, turn on output_2
+        recommendations = {
+            "input": "turn_off",
+            "output_1": "turn_off",
+            "output_2": "turn_on"
+        }
+        reasoning = f"Battery at {battery_percentage}% - good level, using output_2"
     
     return {
         "recommendations": recommendations,
@@ -900,11 +886,10 @@ async def background_worker():
                 if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
                     logger.critical(f"🚨 SwitchBot failure threshold reached - {consecutive_switchbot_failures} consecutive failures")
                     logger.critical("⚠️  Cannot reliably tap screen - entering SAFE SHUTDOWN mode")
-                    logger.critical("🔌 Turning off all devices (input, output_1, output_2) to prevent damage from false readings")
+                    logger.critical("🔌 Turning off all devices (input, output_2) to prevent damage from false readings")
 
                     # Turn off all devices for safety - we can't trust any readings without screen control
                     await control_device("input", False, force=True)
-                    await control_device("output_1", False, force=True)
                     await control_device("output_2", False, force=True)
 
                     logger.info("✅ Safe shutdown complete - all devices turned off")
