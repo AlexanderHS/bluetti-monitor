@@ -9,6 +9,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
+      - ./training_data:/app/training_data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -25,6 +26,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/app/data
+      - ./training_data:/app/training_data
     command: ["python", "worker.py"]
     healthcheck:
       test: ["CMD", "python", "-c", "import sqlite3; conn = sqlite3.connect('/app/data/battery_readings.db'); cursor = conn.execute('SELECT timestamp FROM battery_readings ORDER BY timestamp DESC LIMIT 1'); result = cursor.fetchone(); conn.close(); import time; exit(0 if result and (time.time() - result[0] < 2700) else 1)"]
