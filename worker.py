@@ -776,117 +776,6 @@ async def control_device(device_name: str, turn_on: bool, force: bool = False):
         logger.error(f"Error controlling device {device_name}: {e}")
         return False
 
-"""
-Shared recommendation logic for Bluetti power management
-
-This module contains the core logic for determining device control recommendations
-based on battery status. It's used by both the API endpoint and the worker.
-"""
-from datetime import datetime
-from typing import Dict, List, Optional
-import logging
-
-logger = logging.getLogger(__name__)
-
-def calculate_device_recommendations(battery_percentage: int) -> Dict:
-    """
-    Calculate device control recommendations based on battery percentage
-    Alternates between output_1 and output_2 based on time to prevent circuit overload
-
-    Args:
-        battery_percentage: Current battery percentage (0-100)
-
-    Returns:
-        Dictionary with device recommendations and reasoning
-    """
-    if battery_percentage == 0:
-        # Zero reading - likely an error state, turn everything off
-        recommendations = {
-            "input": "turn_off",
-            "output_1": "turn_off",
-            "output_2": "turn_off"
-        }
-        reasoning = "Battery at 0% - likely error state, turning everything off for safety"
-
-    elif battery_percentage < 10:
-        # Below 10% - turn off outputs, turn on input (charge)
-        recommendations = {
-            "input": "turn_on",
-            "output_1": "turn_off",
-            "output_2": "turn_off"
-        }
-        reasoning = f"Battery at {battery_percentage}% - critical low, charging needed"
-        
-    elif 10 <= battery_percentage < 60:
-        # Between 10-60% - turn off input, turn off outputs (conservation)
-        recommendations = {
-            "input": "turn_off",
-            "output_1": "turn_off", 
-            "output_2": "turn_off"
-        }
-        reasoning = f"Battery at {battery_percentage}% - low, conserving power"
-        
-    else:  # battery_percentage >= 60
-        # Above 60% - turn off input, turn on output_2
-        recommendations = {
-            "input": "turn_off",
-            "output_1": "turn_off",
-            "output_2": "turn_on"
-        }
-        reasoning = f"Battery at {battery_percentage}% - good level, using output_2"
-    
-    return {
-        "recommendations": recommendations,
-        "reasoning": reasoning
-    }
-
-def analyze_recent_readings_for_recommendations(readings_last_30min: List[Dict]) -> Dict:
-    """
-    Analyze recent readings and generate recommendations
-    
-    Args:
-        readings_last_30min: List of battery readings from the last 30 minutes
-        
-    Returns:
-        Dictionary with recommendation result including status, recommendations, and metadata
-    """
-    # Case 1: No readings in the last 30 minutes - we're blind
-    if not readings_last_30min:
-        return {
-            "success": True,
-            "status": "blind",
-            "message": "No recent readings in the last 30 minutes",
-            "recommendations": {
-                "input": "turn_off",
-                "output_1": "turn_off", 
-                "output_2": "turn_off"
-            },
-            "reasoning": "No recent battery data available - turning off all outputs and input for safety",
-            "last_reading_age_minutes": None,
-            "battery_percentage": None
-        }
-    
-    # Case 2: We have recent readings - analyze battery percentage
-    latest_reading = readings_last_30min[0]  # Most recent reading
-    battery_percentage = latest_reading["battery_percentage"]
-    last_reading_age_minutes = (datetime.now().timestamp() - latest_reading["timestamp"]) / 60
-    
-    # Get recommendations based on battery percentage
-    recommendation_result = calculate_device_recommendations(battery_percentage)
-    
-    return {
-        "success": True,
-        "status": "active",
-        "message": "Recommendations based on recent battery status",
-        "recommendations": recommendation_result["recommendations"],
-        "reasoning": recommendation_result["reasoning"],
-        "battery_percentage": battery_percentage,
-        "last_reading_age_minutes": round(last_reading_age_minutes, 1),
-        "readings_in_last_30min": len(readings_last_30min),
-        "confidence": latest_reading.get("confidence", None),
-        "last_reading_timestamp": latest_reading["timestamp"]
-    }
-
 async def control_devices_based_on_battery(battery_percentage: int, force: bool = False):
     """
     Control devices based on battery percentage using shared recommendation logic.
@@ -1005,18 +894,23 @@ async def background_worker():
 
     while True:
         try:
+            # Discover devices at start of each cycle
+            discovery_result = device_discovery.discover_devices()
+
             # Query device states and check monitoring mode at start of each cycle
             device_states = get_device_states()
-            input_on = device_states.get("input", False)
-            output_on = device_states.get("output_2", False)
+
+            # Check if any inputs or outputs are on
+            input_on = device_discovery.is_any_input_on()
+            output_on = device_discovery.is_any_output_on()
             is_daylight = switchbot_controller._is_daylight_hours()
 
             # Determine current monitoring mode
             mode_factors = []
             if input_on:
-                mode_factors.append("input ON")
+                mode_factors.append("input(s) ON")
             if output_on:
-                mode_factors.append("output ON")
+                mode_factors.append("output(s) ON")
             if is_daylight:
                 mode_factors.append("daylight hours")
 
@@ -1054,11 +948,13 @@ async def background_worker():
                         else:
                             logger.critical(f"⚠️  Still in SAFE SHUTDOWN mode - SwitchBot unreliable for {(current_time - safe_shutdown_last_log_time) / 60:.0f} minutes")
 
-                        logger.critical("🔌 Turning off all devices (input, output_2) to prevent damage from false readings")
+                        logger.critical("🔌 Turning off all discovered devices to prevent damage from false readings")
 
                         # Turn off all devices for safety - we can't trust any readings without screen control
-                        await control_device("input", False, force=True)
-                        await control_device("output_2", False, force=True)
+                        for inp in discovery_result.get("inputs", []):
+                            await control_device(inp["name"], False, force=True)
+                        for out in discovery_result.get("outputs", []):
+                            await control_device(out["name"], False, force=True)
 
                         logger.info("✅ Safe shutdown complete - all devices turned off")
                         logger.info("💡 Tip: Check SwitchBot connectivity and configuration")
@@ -1067,8 +963,10 @@ async def background_worker():
                         in_safe_shutdown = True
                     else:
                         # Still in safe shutdown but not logging - just turn off devices silently
-                        await control_device("input", False, force=True)
-                        await control_device("output_2", False, force=True)
+                        for inp in discovery_result.get("inputs", []):
+                            await control_device(inp["name"], False, force=True)
+                        for out in discovery_result.get("outputs", []):
+                            await control_device(out["name"], False, force=True)
 
                     # Skip OCR entirely - we can't trust readings without screen control
                     should_skip_ocr = True

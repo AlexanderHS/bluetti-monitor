@@ -18,6 +18,7 @@ import logging
 from pathlib import Path
 from recommendations import analyze_recent_readings_for_recommendations
 from switchbot_controller import switchbot_controller
+from device_discovery import device_discovery
 
 load_dotenv()
 
@@ -1458,42 +1459,30 @@ async def capture_and_analyze():
 
 def get_device_states():
     """
-    Query device states from the device control API
+    Query device states from the device control API using dynamic discovery
 
     Returns:
-        dict: Dictionary with device states, e.g., {"input": False, "output_2": True}
+        dict: Dictionary with device states for all discovered devices
               Returns empty dict on error
     """
-    control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
-    control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
-    devices_url = f"http://{control_api_host}:{control_api_port}/devices"
+    return device_discovery.get_device_states()
 
+
+@app.get("/devices")
+async def get_devices():
+    """Get discovered devices and segmentation info"""
     try:
-        response = requests.get(
-            devices_url,
-            headers={"accept": "application/json"},
-            timeout=5
-        )
+        discovery_result = device_discovery.discover_devices()
+        segmentation_info = device_discovery.get_segmentation_info()
 
-        if response.status_code == 200:
-            data = response.json()
-            devices = data.get("devices", [])
-
-            # Extract states for input and output_2
-            states = {}
-            for device in devices:
-                name = device.get("name")
-                if name in ["input", "output_2"]:
-                    states[name] = device.get("known_state", False)
-
-            return states
-        else:
-            logger.warning(f"Failed to get device states: HTTP {response.status_code}")
-            return {}
-
+        return {
+            "success": discovery_result["success"],
+            "discovery": discovery_result,
+            "segmentation": segmentation_info,
+            "device_states": get_device_states()
+        }
     except Exception as e:
-        logger.warning(f"Error getting device states: {e}")
-        return {}
+        return {"success": False, "error": f"Failed to get devices: {str(e)}"}
 
 
 @app.get("/switchbot/status")
@@ -1502,8 +1491,10 @@ async def get_switchbot_status():
     try:
         # Query device states to provide accurate interval info
         device_states = get_device_states()
-        input_on = device_states.get("input", False)
-        output_on = device_states.get("output_2", False)
+
+        # Check if any inputs or outputs are on
+        input_on = device_discovery.is_any_input_on()
+        output_on = device_discovery.is_any_output_on()
 
         status = await switchbot_controller.get_status(input_on=input_on, output_on=output_on)
         return {"success": True, "device_states": device_states, **status}
