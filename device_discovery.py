@@ -56,15 +56,24 @@ class DeviceDiscovery:
             devices = data.get("devices", [])
 
             # Categorize devices based on name (case-insensitive)
+            # Only include devices that are ONLINE
             inputs = []
             outputs = []
 
             for device in devices:
                 name = device.get("name", "")
+                online = device.get("online", True)  # Default to True for backward compatibility
+
                 if "input" in name.lower():
-                    inputs.append(device)
+                    if online:
+                        inputs.append(device)
+                    else:
+                        logger.debug(f"Skipping offline input: {name}")
                 elif "output" in name.lower():
-                    outputs.append(device)
+                    if online:
+                        outputs.append(device)
+                    else:
+                        logger.debug(f"Skipping offline output: {name}")
 
             # Cache the discovered devices
             self._inputs = inputs
@@ -73,15 +82,13 @@ class DeviceDiscovery:
 
             # Only log at INFO level when device counts change
             if len(inputs) != self._last_input_count or len(outputs) != self._last_output_count:
-                logger.info(f"Device discovery: found {len(inputs)} input(s), {len(outputs)} output(s)")
+                logger.info(f"Device discovery: {len(inputs)} online input(s), {len(outputs)} online output(s)")
                 if inputs:
-                    logger.info(f"  Inputs: {[d.get('name') for d in inputs]}")
+                    logger.info(f"  Online inputs: {[d.get('name') for d in inputs]}")
                 if outputs:
-                    logger.info(f"  Outputs: {[d.get('name') for d in outputs]}")
+                    logger.info(f"  Online outputs: {[d.get('name') for d in outputs]}")
                 self._last_input_count = len(inputs)
                 self._last_output_count = len(outputs)
-            else:
-                logger.debug(f"Device discovery: {len(inputs)} input(s), {len(outputs)} output(s) (unchanged)")
 
             return {
                 "success": True,
