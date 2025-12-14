@@ -1,4 +1,5 @@
 import os
+import shutil
 import requests
 from urllib.parse import urljoin
 from fastapi import FastAPI, Query
@@ -9,7 +10,7 @@ import cv2
 import numpy as np
 import pytesseract
 from io import BytesIO
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse, FileResponse
 import aiosqlite
 from datetime import datetime
 from typing import List, Dict
@@ -1614,6 +1615,486 @@ async def manually_label_last_image(percentage: int):
 
     except Exception as e:
         return {"success": False, "error": f"Failed to label image: {str(e)}"}
+
+
+@app.get("/training/images")
+async def list_training_images(percentage: int = None):
+    """
+    List all training images, optionally filtered by percentage.
+
+    Args:
+        percentage: Optional filter for specific percentage (0-100)
+
+    Returns:
+        Dictionary with images grouped by percentage
+    """
+    try:
+        training_dir = Path(template_classifier.training_data_dir)
+        result = {}
+
+        percentages_to_check = [percentage] if percentage is not None else range(101)
+
+        for pct in percentages_to_check:
+            pct_dir = training_dir / str(pct)
+            if pct_dir.exists():
+                images = sorted(pct_dir.glob("*.jpg"), key=lambda x: x.stat().st_mtime, reverse=True)
+                if images:
+                    result[pct] = [img.name for img in images]
+
+        return {"success": True, "images": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/training/image/{percentage}/{filename}")
+async def get_training_image(percentage: int, filename: str):
+    """
+    Serve a specific training image.
+
+    Args:
+        percentage: The percentage folder (0-100)
+        filename: The image filename
+
+    Returns:
+        The image file
+    """
+    try:
+        if not (0 <= percentage <= 100):
+            return {"success": False, "error": "Invalid percentage"}
+
+        training_dir = Path(template_classifier.training_data_dir)
+        image_path = training_dir / str(percentage) / filename
+
+        if not image_path.exists():
+            return {"success": False, "error": "Image not found"}
+
+        # Security check: ensure path is within training_data
+        if not str(image_path.resolve()).startswith(str(training_dir.resolve())):
+            return {"success": False, "error": "Invalid path"}
+
+        return FileResponse(image_path, media_type="image/jpeg")
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/training/reclassify")
+async def reclassify_training_image(
+    filename: str,
+    from_percentage: int,
+    to_percentage: int
+):
+    """
+    Move an image from one percentage folder to another (reclassify it).
+
+    Args:
+        filename: The image filename
+        from_percentage: Current percentage folder (0-100)
+        to_percentage: Target percentage folder (0-100)
+
+    Returns:
+        Success status
+    """
+    try:
+        if not (0 <= from_percentage <= 100) or not (0 <= to_percentage <= 100):
+            return {"success": False, "error": "Invalid percentage values"}
+
+        if from_percentage == to_percentage:
+            return {"success": False, "error": "Source and target are the same"}
+
+        training_dir = Path(template_classifier.training_data_dir)
+        source_path = training_dir / str(from_percentage) / filename
+        target_dir = training_dir / str(to_percentage)
+        target_path = target_dir / filename
+
+        if not source_path.exists():
+            return {"success": False, "error": "Source image not found"}
+
+        # Security check
+        if not str(source_path.resolve()).startswith(str(training_dir.resolve())):
+            return {"success": False, "error": "Invalid source path"}
+
+        # Ensure target directory exists
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check FIFO - if target has 10+ images, delete oldest
+        existing_images = sorted(target_dir.glob("*.jpg"))
+        if len(existing_images) >= template_classifier.max_images_per_percentage:
+            oldest = existing_images[0]
+            oldest.unlink()
+            logger.info(f"FIFO rotation in {to_percentage}/: deleted {oldest.name}")
+
+        # Move the file
+        shutil.move(str(source_path), str(target_path))
+
+        # Reload templates
+        template_classifier._load_templates()
+
+        logger.info(f"Reclassified {filename}: {from_percentage}% -> {to_percentage}%")
+
+        return {
+            "success": True,
+            "message": f"Moved {filename} from {from_percentage}% to {to_percentage}%",
+            "coverage_stats": get_training_status()
+        }
+    except Exception as e:
+        logger.error(f"Reclassify failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/training/image/{percentage}/{filename}")
+async def delete_training_image(percentage: int, filename: str):
+    """
+    Delete a specific training image.
+
+    Args:
+        percentage: The percentage folder (0-100)
+        filename: The image filename
+
+    Returns:
+        Success status
+    """
+    try:
+        if not (0 <= percentage <= 100):
+            return {"success": False, "error": "Invalid percentage"}
+
+        training_dir = Path(template_classifier.training_data_dir)
+        image_path = training_dir / str(percentage) / filename
+
+        if not image_path.exists():
+            return {"success": False, "error": "Image not found"}
+
+        # Security check
+        if not str(image_path.resolve()).startswith(str(training_dir.resolve())):
+            return {"success": False, "error": "Invalid path"}
+
+        image_path.unlink()
+        template_classifier._load_templates()
+
+        logger.info(f"Deleted training image: {percentage}/{filename}")
+
+        return {
+            "success": True,
+            "message": f"Deleted {filename} from {percentage}%",
+            "coverage_stats": get_training_status()
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/training/review", response_class=HTMLResponse)
+async def training_review_ui():
+    """
+    Serve the training image review UI.
+    """
+    html_content = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Training Image Review</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e; color: #eee; padding: 20px;
+        }
+        h1 { margin-bottom: 10px; color: #00d4ff; }
+        .stats {
+            background: #16213e; padding: 15px; border-radius: 8px;
+            margin-bottom: 20px; display: flex; gap: 30px; flex-wrap: wrap;
+        }
+        .stat { text-align: center; }
+        .stat-value { font-size: 2em; font-weight: bold; color: #00d4ff; }
+        .stat-label { font-size: 0.9em; color: #888; }
+        .controls {
+            background: #16213e; padding: 15px; border-radius: 8px;
+            margin-bottom: 20px; display: flex; gap: 15px; align-items: center; flex-wrap: wrap;
+        }
+        select, button, input {
+            padding: 10px 15px; border-radius: 5px; border: none;
+            font-size: 1em; cursor: pointer;
+        }
+        select { background: #0f3460; color: #eee; }
+        button { background: #00d4ff; color: #1a1a2e; font-weight: bold; }
+        button:hover { background: #00a8cc; }
+        button.danger { background: #e94560; color: white; }
+        button.danger:hover { background: #c73e54; }
+        .grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        .image-card {
+            background: #16213e; border-radius: 8px; overflow: hidden;
+            cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .image-card:hover { transform: translateY(-3px); box-shadow: 0 5px 20px rgba(0,212,255,0.3); }
+        .image-card.selected { box-shadow: 0 0 0 3px #00d4ff; }
+        .image-card img { width: 100%; height: 150px; object-fit: cover; }
+        .image-card .info { padding: 10px; font-size: 0.85em; }
+        .image-card .filename { color: #888; word-break: break-all; }
+        .modal {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); z-index: 1000; justify-content: center; align-items: center;
+        }
+        .modal.active { display: flex; }
+        .modal-content {
+            background: #16213e; padding: 20px; border-radius: 10px;
+            max-width: 90%; max-height: 90%; overflow: auto; text-align: center;
+        }
+        .modal-content img { max-width: 100%; max-height: 60vh; margin-bottom: 20px; }
+        .modal-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+        .percentage-grid {
+            display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px;
+            margin: 15px 0;
+        }
+        .pct-btn {
+            padding: 8px; font-size: 0.9em; background: #0f3460;
+            border: none; border-radius: 3px; color: #eee; cursor: pointer;
+        }
+        .pct-btn:hover { background: #00d4ff; color: #1a1a2e; }
+        .pct-btn.current { background: #e94560; }
+        .close-btn {
+            position: absolute; top: 20px; right: 30px; font-size: 2em;
+            color: #eee; cursor: pointer;
+        }
+        .toast {
+            position: fixed; bottom: 20px; right: 20px; padding: 15px 25px;
+            background: #00d4ff; color: #1a1a2e; border-radius: 5px;
+            font-weight: bold; display: none; z-index: 1001;
+        }
+        .toast.error { background: #e94560; color: white; }
+        .toast.show { display: block; }
+        .empty-state { text-align: center; padding: 50px; color: #666; }
+        .percentage-selector { margin-bottom: 15px; }
+        .percentage-selector label { margin-right: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Training Image Review</h1>
+
+    <div class="stats" id="stats">
+        <div class="stat">
+            <div class="stat-value" id="coverage">-</div>
+            <div class="stat-label">Coverage</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value" id="total-images">-</div>
+            <div class="stat-label">Total Images</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value" id="values-covered">-</div>
+            <div class="stat-label">Values Covered</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value" id="comparison-mode">-</div>
+            <div class="stat-label">Comparison Mode</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <label>View percentage:</label>
+        <select id="percentage-filter">
+            <option value="all">All with images</option>
+        </select>
+        <button onclick="loadImages()">Refresh</button>
+    </div>
+
+    <div class="grid" id="image-grid"></div>
+
+    <div class="modal" id="modal">
+        <span class="close-btn" onclick="closeModal()">&times;</span>
+        <div class="modal-content">
+            <img id="modal-image" src="" alt="Training image">
+            <p id="modal-info"></p>
+            <p class="percentage-selector">
+                <label>Reclassify to:</label>
+            </p>
+            <div class="percentage-grid" id="percentage-grid"></div>
+            <div class="modal-actions">
+                <button class="danger" onclick="deleteImage()">Delete Image</button>
+                <button onclick="closeModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        let currentImage = null;
+        let allImages = {};
+
+        async function loadStats() {
+            try {
+                const res = await fetch('/training/status');
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('coverage').textContent = data.coverage_percentage.toFixed(1) + '%';
+                    document.getElementById('total-images').textContent = data.total_images;
+                    document.getElementById('values-covered').textContent = data.values_with_examples + '/101';
+                    document.getElementById('comparison-mode').textContent = data.comparison_mode_active ? 'Active' : 'Inactive';
+                }
+            } catch (e) {
+                console.error('Failed to load stats:', e);
+            }
+        }
+
+        async function loadImages() {
+            try {
+                const res = await fetch('/training/images');
+                const data = await res.json();
+                if (data.success) {
+                    allImages = data.images;
+                    updateFilter();
+                    renderImages();
+                }
+            } catch (e) {
+                console.error('Failed to load images:', e);
+            }
+        }
+
+        function updateFilter() {
+            const select = document.getElementById('percentage-filter');
+            const currentValue = select.value;
+            select.innerHTML = '<option value="all">All with images</option>';
+
+            Object.keys(allImages).sort((a, b) => parseInt(a) - parseInt(b)).forEach(pct => {
+                const count = allImages[pct].length;
+                const opt = document.createElement('option');
+                opt.value = pct;
+                opt.textContent = pct + '% (' + count + ' images)';
+                select.appendChild(opt);
+            });
+
+            select.value = currentValue;
+        }
+
+        function renderImages() {
+            const grid = document.getElementById('image-grid');
+            const filter = document.getElementById('percentage-filter').value;
+
+            let html = '';
+            const percentages = filter === 'all'
+                ? Object.keys(allImages).sort((a, b) => parseInt(a) - parseInt(b))
+                : [filter];
+
+            if (percentages.length === 0 || (percentages.length === 1 && !allImages[percentages[0]])) {
+                grid.innerHTML = '<div class="empty-state">No images found</div>';
+                return;
+            }
+
+            percentages.forEach(pct => {
+                if (!allImages[pct]) return;
+                allImages[pct].forEach(filename => {
+                    html += `
+                        <div class="image-card" onclick="openModal(${pct}, '${filename}')">
+                            <img src="/training/image/${pct}/${filename}" alt="${pct}%" loading="lazy">
+                            <div class="info">
+                                <strong>${pct}%</strong>
+                                <div class="filename">${filename}</div>
+                            </div>
+                        </div>
+                    `;
+                });
+            });
+
+            grid.innerHTML = html;
+        }
+
+        function openModal(percentage, filename) {
+            currentImage = { percentage, filename };
+            document.getElementById('modal-image').src = `/training/image/${percentage}/${filename}`;
+            document.getElementById('modal-info').textContent = `Current: ${percentage}% | ${filename}`;
+
+            // Build percentage grid
+            let gridHtml = '';
+            for (let i = 0; i <= 100; i++) {
+                const isCurrent = i === percentage;
+                gridHtml += `<button class="pct-btn ${isCurrent ? 'current' : ''}"
+                    onclick="${isCurrent ? '' : `reclassify(${i})`}"
+                    ${isCurrent ? 'disabled' : ''}>${i}</button>`;
+            }
+            document.getElementById('percentage-grid').innerHTML = gridHtml;
+
+            document.getElementById('modal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('modal').classList.remove('active');
+            currentImage = null;
+        }
+
+        async function reclassify(toPercentage) {
+            if (!currentImage) return;
+
+            try {
+                const res = await fetch('/training/reclassify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `filename=${encodeURIComponent(currentImage.filename)}&from_percentage=${currentImage.percentage}&to_percentage=${toPercentage}`
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast(`Moved to ${toPercentage}%`);
+                    closeModal();
+                    loadImages();
+                    loadStats();
+                } else {
+                    showToast(data.error || 'Failed to reclassify', true);
+                }
+            } catch (e) {
+                showToast('Error: ' + e.message, true);
+            }
+        }
+
+        async function deleteImage() {
+            if (!currentImage) return;
+            if (!confirm('Delete this image?')) return;
+
+            try {
+                const res = await fetch(`/training/image/${currentImage.percentage}/${currentImage.filename}`, {
+                    method: 'DELETE'
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast('Image deleted');
+                    closeModal();
+                    loadImages();
+                    loadStats();
+                } else {
+                    showToast(data.error || 'Failed to delete', true);
+                }
+            } catch (e) {
+                showToast('Error: ' + e.message, true);
+            }
+        }
+
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast show' + (isError ? ' error' : '');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        // Event listeners
+        document.getElementById('percentage-filter').addEventListener('change', renderImages);
+        document.getElementById('modal').addEventListener('click', (e) => {
+            if (e.target.id === 'modal') closeModal();
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
+
+        // Initial load
+        loadStats();
+        loadImages();
+    </script>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html_content)
 
 
 if __name__ == "__main__":
