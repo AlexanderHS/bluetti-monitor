@@ -2,7 +2,7 @@ import os
 import shutil
 import requests
 from urllib.parse import urljoin
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Form
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import uvicorn
@@ -1679,9 +1679,9 @@ async def get_training_image(percentage: int, filename: str):
 
 @app.post("/training/reclassify")
 async def reclassify_training_image(
-    filename: str,
-    from_percentage: int,
-    to_percentage: int
+    filename: str = Form(...),
+    from_percentage: int = Form(...),
+    to_percentage: int = Form(...)
 ):
     """
     Move an image from one percentage folder to another (reclassify it).
