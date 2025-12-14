@@ -83,6 +83,7 @@ bluetti-monitor.log
 # Application specific
 captured_images/
 temp_images/
+training_data/
 *.jpg
 *.png
 *.jpeg

@@ -26,6 +26,7 @@ from groq_ocr import groq_ocr
 from switchbot_controller import switchbot_controller
 from device_discovery import device_discovery
 from recommendations import calculate_device_recommendations, analyze_recent_readings_for_recommendations
+from template_classifier import template_classifier, log_comparison
 
 load_dotenv()
 
@@ -1065,10 +1066,28 @@ async def background_worker():
             start_time = time.time()
             ocr_result = await gemini_ocr_analysis_with_voting()
             processing_time = time.time() - start_time
-            
+
             if ocr_result["success"]:
                 battery_percentage = ocr_result["battery_percentage"]
                 confidence = ocr_result["confidence"]
+
+                # COLLECTION MODE: Save image with Gemini's label (always active)
+                try:
+                    # Capture and process image for collection (same as what Gemini saw)
+                    processed_image = capture_and_process_image_for_gemini()
+                    save_success = template_classifier.save_labeled_image(processed_image, battery_percentage)
+                    if save_success:
+                        logger.debug(f"Collected training image for {battery_percentage}%")
+                except Exception as e:
+                    logger.warning(f"Failed to collect training image: {e}")
+
+                # COMPARISON MODE: Log template matching prediction if coverage >= 50%
+                if template_classifier.should_enable_comparison_mode():
+                    try:
+                        template_result = template_classifier.classify_image(processed_image)
+                        log_comparison(battery_percentage, template_result)
+                    except Exception as e:
+                        logger.warning(f"Template comparison failed: {e}")
 
                 if confidence >= confidence_threshold:
                     # Check plausibility against last reading

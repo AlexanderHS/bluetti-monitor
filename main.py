@@ -19,6 +19,7 @@ from pathlib import Path
 from recommendations import analyze_recent_readings_for_recommendations
 from switchbot_controller import switchbot_controller
 from device_discovery import device_discovery
+from template_classifier import template_classifier, get_training_status
 
 load_dotenv()
 
@@ -1515,6 +1516,104 @@ async def tap_screen_manual(force: bool = False):
         return result
     except Exception as e:
         return {"success": False, "error": f"Failed to tap screen: {str(e)}"}
+
+
+@app.get("/training/status")
+async def get_training_status_endpoint():
+    """
+    Get template matching training status and coverage statistics
+
+    Returns:
+        Dictionary with coverage stats, images per percentage, and total images
+    """
+    try:
+        status = get_training_status()
+        return {"success": True, **status}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to get training status: {str(e)}"}
+
+
+@app.post("/training/enable")
+async def enable_training_collection(enabled: bool = True):
+    """
+    Manually enable or disable training image collection
+
+    Args:
+        enabled: True to enable collection, False to disable (default: True)
+
+    Returns:
+        Success status and current collection state
+    """
+    try:
+        template_classifier.enable_collection(enabled)
+        status = get_training_status()
+        return {
+            "success": True,
+            "collection_enabled": status["collection_enabled"],
+            "message": f"Collection {'enabled' if enabled else 'disabled'}"
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Failed to change collection state: {str(e)}"}
+
+
+@app.post("/training/label/{percentage}")
+async def manually_label_last_image(percentage: int):
+    """
+    Manually label/relabel the last captured image with a specific percentage
+
+    Args:
+        percentage: Correct percentage value (0-100)
+
+    Returns:
+        Success status
+    """
+    try:
+        if not (0 <= percentage <= 100):
+            return {
+                "success": False,
+                "error": f"Invalid percentage {percentage}, must be 0-100"
+            }
+
+        # Capture and process current image
+        image_bytes = capture_image()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return {"success": False, "error": "Failed to decode image"}
+
+        # Get crop coordinates and process (same as /capture/flip)
+        coords = get_crop_coordinates()
+        result = img[coords['y1']:coords['y2'], coords['x1']:coords['x2']]
+
+        # Apply transformations
+        if os.getenv("IMAGE_FLIP_HORIZONTAL", "true").lower() == "true":
+            result = cv2.flip(result, 1)
+        if os.getenv("IMAGE_ROTATE_180", "false").lower() == "true":
+            result = cv2.rotate(result, cv2.ROTATE_180)
+
+        # Encode as JPEG
+        _, buffer = cv2.imencode('.jpg', result)
+        processed_image = buffer.tobytes()
+
+        # Save with manual label
+        success = template_classifier.manually_label_image(processed_image, percentage)
+
+        if success:
+            status = get_training_status()
+            return {
+                "success": True,
+                "message": f"Successfully labeled image as {percentage}%",
+                "coverage_stats": status
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to save labeled image"
+            }
+
+    except Exception as e:
+        return {"success": False, "error": f"Failed to label image: {str(e)}"}
 
 
 if __name__ == "__main__":
