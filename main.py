@@ -1557,23 +1557,33 @@ async def enable_training_collection(enabled: bool = True):
         return {"success": False, "error": f"Failed to change collection state: {str(e)}"}
 
 
-@app.post("/training/label/{percentage}")
-async def manually_label_last_image(percentage: int):
+@app.post("/training/label/{category}")
+async def manually_label_last_image(category: str):
     """
-    Manually label/relabel the last captured image with a specific percentage
+    Manually label/relabel the last captured image with a specific category
 
     Args:
-        percentage: Correct percentage value (0-100)
+        category: Correct category value (0-100 or "invalid")
 
     Returns:
         Success status
     """
     try:
-        if not (0 <= percentage <= 100):
-            return {
-                "success": False,
-                "error": f"Invalid percentage {percentage}, must be 0-100"
-            }
+        # Validate category
+        if category != "invalid":
+            try:
+                cat_int = int(category)
+                if not (0 <= cat_int <= 100):
+                    return {
+                        "success": False,
+                        "error": f"Invalid category {category}, must be 0-100 or 'invalid'"
+                    }
+                category = cat_int  # Convert to int for consistency
+            except ValueError:
+                return {
+                    "success": False,
+                    "error": f"Invalid category {category}, must be 0-100 or 'invalid'"
+                }
 
         # Capture and process current image
         image_bytes = capture_image()
@@ -1598,13 +1608,13 @@ async def manually_label_last_image(percentage: int):
         processed_image = buffer.tobytes()
 
         # Save with manual label
-        success = template_classifier.manually_label_image(processed_image, percentage)
+        success = template_classifier.manually_label_image(processed_image, category)
 
         if success:
             status = get_training_status()
             return {
                 "success": True,
-                "message": f"Successfully labeled image as {percentage}%",
+                "message": f"Successfully labeled image as {category}",
                 "coverage_stats": status
             }
         else:
@@ -1618,52 +1628,63 @@ async def manually_label_last_image(percentage: int):
 
 
 @app.get("/training/images")
-async def list_training_images(percentage: int = None):
+async def list_training_images(category: str = None):
     """
-    List all training images, optionally filtered by percentage.
+    List all training images, optionally filtered by category.
 
     Args:
-        percentage: Optional filter for specific percentage (0-100)
+        category: Optional filter for specific category (0-100 or "invalid")
 
     Returns:
-        Dictionary with images grouped by percentage
+        Dictionary with images grouped by category
     """
     try:
         training_dir = Path(template_classifier.training_data_dir)
         result = {}
 
-        percentages_to_check = [percentage] if percentage is not None else range(101)
+        # Determine which categories to check
+        if category is not None:
+            categories_to_check = [category]
+        else:
+            # Check all percentages (0-100) plus "invalid"
+            categories_to_check = [str(i) for i in range(101)] + ["invalid"]
 
-        for pct in percentages_to_check:
-            pct_dir = training_dir / str(pct)
-            if pct_dir.exists():
-                images = sorted(pct_dir.glob("*.jpg"), key=lambda x: x.stat().st_mtime, reverse=True)
+        for cat in categories_to_check:
+            cat_dir = training_dir / str(cat)
+            if cat_dir.exists():
+                images = sorted(cat_dir.glob("*.jpg"), key=lambda x: x.stat().st_mtime, reverse=True)
                 if images:
-                    result[pct] = [img.name for img in images]
+                    result[cat] = [img.name for img in images]
 
         return {"success": True, "images": result}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-@app.get("/training/image/{percentage}/{filename}")
-async def get_training_image(percentage: int, filename: str):
+@app.get("/training/image/{category}/{filename}")
+async def get_training_image(category: str, filename: str):
     """
     Serve a specific training image.
 
     Args:
-        percentage: The percentage folder (0-100)
+        category: The category folder (0-100 or "invalid")
         filename: The image filename
 
     Returns:
         The image file
     """
     try:
-        if not (0 <= percentage <= 100):
-            return {"success": False, "error": "Invalid percentage"}
+        # Validate category
+        if category != "invalid":
+            try:
+                cat_int = int(category)
+                if not (0 <= cat_int <= 100):
+                    return {"success": False, "error": "Invalid category"}
+            except ValueError:
+                return {"success": False, "error": "Invalid category"}
 
         training_dir = Path(template_classifier.training_data_dir)
-        image_path = training_dir / str(percentage) / filename
+        image_path = training_dir / str(category) / filename
 
         if not image_path.exists():
             return {"success": False, "error": "Image not found"}
@@ -1680,30 +1701,40 @@ async def get_training_image(percentage: int, filename: str):
 @app.post("/training/reclassify")
 async def reclassify_training_image(
     filename: str = Form(...),
-    from_percentage: int = Form(...),
-    to_percentage: int = Form(...)
+    from_category: str = Form(...),
+    to_category: str = Form(...)
 ):
     """
-    Move an image from one percentage folder to another (reclassify it).
+    Move an image from one category folder to another (reclassify it).
 
     Args:
         filename: The image filename
-        from_percentage: Current percentage folder (0-100)
-        to_percentage: Target percentage folder (0-100)
+        from_category: Current category folder (0-100 or "invalid")
+        to_category: Target category folder (0-100 or "invalid")
 
     Returns:
         Success status
     """
     try:
-        if not (0 <= from_percentage <= 100) or not (0 <= to_percentage <= 100):
-            return {"success": False, "error": "Invalid percentage values"}
+        # Validate categories
+        def is_valid_category(cat):
+            if cat == "invalid":
+                return True
+            try:
+                cat_int = int(cat)
+                return 0 <= cat_int <= 100
+            except (ValueError, TypeError):
+                return False
 
-        if from_percentage == to_percentage:
+        if not is_valid_category(from_category) or not is_valid_category(to_category):
+            return {"success": False, "error": "Invalid category values"}
+
+        if from_category == to_category:
             return {"success": False, "error": "Source and target are the same"}
 
         training_dir = Path(template_classifier.training_data_dir)
-        source_path = training_dir / str(from_percentage) / filename
-        target_dir = training_dir / str(to_percentage)
+        source_path = training_dir / str(from_category) / filename
+        target_dir = training_dir / str(to_category)
         target_path = target_dir / filename
 
         if not source_path.exists():
@@ -1721,7 +1752,7 @@ async def reclassify_training_image(
         if len(existing_images) >= template_classifier.max_images_per_percentage:
             oldest = existing_images[0]
             oldest.unlink()
-            logger.info(f"FIFO rotation in {to_percentage}/: deleted {oldest.name}")
+            logger.info(f"FIFO rotation in {to_category}/: deleted {oldest.name}")
 
         # Move the file
         shutil.move(str(source_path), str(target_path))
@@ -1729,11 +1760,11 @@ async def reclassify_training_image(
         # Reload templates
         template_classifier._load_templates()
 
-        logger.info(f"Reclassified {filename}: {from_percentage}% -> {to_percentage}%")
+        logger.info(f"Reclassified {filename}: {from_category} -> {to_category}")
 
         return {
             "success": True,
-            "message": f"Moved {filename} from {from_percentage}% to {to_percentage}%",
+            "message": f"Moved {filename} from {from_category} to {to_category}",
             "coverage_stats": get_training_status()
         }
     except Exception as e:
@@ -1741,24 +1772,30 @@ async def reclassify_training_image(
         return {"success": False, "error": str(e)}
 
 
-@app.delete("/training/image/{percentage}/{filename}")
-async def delete_training_image(percentage: int, filename: str):
+@app.delete("/training/image/{category}/{filename}")
+async def delete_training_image(category: str, filename: str):
     """
     Delete a specific training image.
 
     Args:
-        percentage: The percentage folder (0-100)
+        category: The category folder (0-100 or "invalid")
         filename: The image filename
 
     Returns:
         Success status
     """
     try:
-        if not (0 <= percentage <= 100):
-            return {"success": False, "error": "Invalid percentage"}
+        # Validate category
+        if category != "invalid":
+            try:
+                cat_int = int(category)
+                if not (0 <= cat_int <= 100):
+                    return {"success": False, "error": "Invalid category"}
+            except ValueError:
+                return {"success": False, "error": "Invalid category"}
 
         training_dir = Path(template_classifier.training_data_dir)
-        image_path = training_dir / str(percentage) / filename
+        image_path = training_dir / str(category) / filename
 
         if not image_path.exists():
             return {"success": False, "error": "Image not found"}
@@ -1770,11 +1807,11 @@ async def delete_training_image(percentage: int, filename: str):
         image_path.unlink()
         template_classifier._load_templates()
 
-        logger.info(f"Deleted training image: {percentage}/{filename}")
+        logger.info(f"Deleted training image: {category}/{filename}")
 
         return {
             "success": True,
-            "message": f"Deleted {filename} from {percentage}%",
+            "message": f"Deleted {filename} from {category}",
             "coverage_stats": get_training_status()
         }
     except Exception as e:
@@ -1958,11 +1995,17 @@ async def training_review_ui():
             const currentValue = select.value;
             select.innerHTML = '<option value="all">All with images</option>';
 
-            Object.keys(allImages).sort((a, b) => parseInt(a) - parseInt(b)).forEach(pct => {
-                const count = allImages[pct].length;
+            // Sort categories: "invalid" first, then numeric 0-100
+            Object.keys(allImages).sort((a, b) => {
+                if (a === 'invalid') return -1;
+                if (b === 'invalid') return 1;
+                return parseInt(a) - parseInt(b);
+            }).forEach(cat => {
+                const count = allImages[cat].length;
                 const opt = document.createElement('option');
-                opt.value = pct;
-                opt.textContent = pct + '% (' + count + ' images)';
+                opt.value = cat;
+                const displayLabel = cat === 'invalid' ? 'invalid' : cat + '%';
+                opt.textContent = displayLabel + ' (' + count + ' images)';
                 select.appendChild(opt);
             });
 
@@ -1974,23 +2017,29 @@ async def training_review_ui():
             const filter = document.getElementById('percentage-filter').value;
 
             let html = '';
-            const percentages = filter === 'all'
-                ? Object.keys(allImages).sort((a, b) => parseInt(a) - parseInt(b))
+            let categories = filter === 'all'
+                ? Object.keys(allImages).sort((a, b) => {
+                    // Sort: "invalid" first, then numeric 0-100
+                    if (a === 'invalid') return -1;
+                    if (b === 'invalid') return 1;
+                    return parseInt(a) - parseInt(b);
+                })
                 : [filter];
 
-            if (percentages.length === 0 || (percentages.length === 1 && !allImages[percentages[0]])) {
+            if (categories.length === 0 || (categories.length === 1 && !allImages[categories[0]])) {
                 grid.innerHTML = '<div class="empty-state">No images found</div>';
                 return;
             }
 
-            percentages.forEach(pct => {
-                if (!allImages[pct]) return;
-                allImages[pct].forEach(filename => {
+            categories.forEach(cat => {
+                if (!allImages[cat]) return;
+                allImages[cat].forEach(filename => {
+                    const displayLabel = cat === 'invalid' ? 'invalid' : cat + '%';
                     html += `
-                        <div class="image-card" onclick="openModal(${pct}, '${filename}')">
-                            <img src="/training/image/${pct}/${filename}" alt="${pct}%" loading="lazy">
+                        <div class="image-card" onclick="openModal('${cat}', '${filename}')">
+                            <img src="/training/image/${cat}/${filename}" alt="${displayLabel}" loading="lazy">
                             <div class="info">
-                                <strong>${pct}%</strong>
+                                <strong>${displayLabel}</strong>
                                 <div class="filename">${filename}</div>
                             </div>
                         </div>
@@ -2001,15 +2050,24 @@ async def training_review_ui():
             grid.innerHTML = html;
         }
 
-        function openModal(percentage, filename) {
-            currentImage = { percentage, filename };
-            document.getElementById('modal-image').src = `/training/image/${percentage}/${filename}`;
-            document.getElementById('modal-info').textContent = `Current: ${percentage}% | ${filename}`;
+        function openModal(category, filename) {
+            currentImage = { category, filename };
+            document.getElementById('modal-image').src = `/training/image/${category}/${filename}`;
+            document.getElementById('modal-info').textContent = `Current: ${category} | ${filename}`;
 
-            // Build percentage grid
+            // Build percentage grid with "invalid" option
             let gridHtml = '';
+
+            // Add "invalid" button first
+            const isCurrentInvalid = category === 'invalid';
+            gridHtml += `<button class="pct-btn ${isCurrentInvalid ? 'current' : ''}"
+                onclick="${isCurrentInvalid ? '' : `reclassify('invalid')`}"
+                ${isCurrentInvalid ? 'disabled' : ''}
+                style="grid-column: span 2; background: #e94560;">invalid</button>`;
+
+            // Add percentage buttons 0-100
             for (let i = 0; i <= 100; i++) {
-                const isCurrent = i === percentage;
+                const isCurrent = i == category;
                 gridHtml += `<button class="pct-btn ${isCurrent ? 'current' : ''}"
                     onclick="${isCurrent ? '' : `reclassify(${i})`}"
                     ${isCurrent ? 'disabled' : ''}>${i}</button>`;
@@ -2024,19 +2082,19 @@ async def training_review_ui():
             currentImage = null;
         }
 
-        async function reclassify(toPercentage) {
+        async function reclassify(toCategory) {
             if (!currentImage) return;
 
             try {
                 const res = await fetch('/training/reclassify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: `filename=${encodeURIComponent(currentImage.filename)}&from_percentage=${currentImage.percentage}&to_percentage=${toPercentage}`
+                    body: `filename=${encodeURIComponent(currentImage.filename)}&from_category=${currentImage.category}&to_category=${toCategory}`
                 });
                 const data = await res.json();
 
                 if (data.success) {
-                    showToast(`Moved to ${toPercentage}%`);
+                    showToast(`Moved to ${toCategory}`);
                     closeModal();
                     loadImages();
                     loadStats();
@@ -2053,7 +2111,7 @@ async def training_review_ui():
             if (!confirm('Delete this image?')) return;
 
             try {
-                const res = await fetch(`/training/image/${currentImage.percentage}/${currentImage.filename}`, {
+                const res = await fetch(`/training/image/${currentImage.category}/${currentImage.filename}`, {
                     method: 'DELETE'
                 });
                 const data = await res.json();

@@ -50,7 +50,7 @@ class TemplateClassifier:
         logger.info(f"TemplateClassifier initialized: {self.get_coverage_stats()}")
 
     def _init_directories(self):
-        """Create training_data directory structure (0-100 subdirectories)"""
+        """Create training_data directory structure (0-100 subdirectories + invalid)"""
         self.training_data_dir.mkdir(parents=True, exist_ok=True)
 
         # Create subdirectories for each percentage value (0-100)
@@ -58,12 +58,17 @@ class TemplateClassifier:
             percentage_dir = self.training_data_dir / str(percentage)
             percentage_dir.mkdir(exist_ok=True)
 
-        logger.debug(f"Initialized {self.training_data_dir} with 0-100 subdirectories")
+        # Create invalid directory for garbled/unreadable images
+        invalid_dir = self.training_data_dir / "invalid"
+        invalid_dir.mkdir(exist_ok=True)
+
+        logger.debug(f"Initialized {self.training_data_dir} with 0-100 subdirectories + invalid")
 
     def _load_templates(self):
         """Load all existing training images into memory as templates"""
         self.templates.clear()
 
+        # Load percentage templates (0-100)
         for percentage in range(101):
             percentage_dir = self.training_data_dir / str(percentage)
             if not percentage_dir.exists():
@@ -84,7 +89,24 @@ class TemplateClassifier:
                 if templates:
                     self.templates[percentage] = templates
 
-        logger.debug(f"Loaded templates for {len(self.templates)} percentage values")
+        # Load invalid templates (special category)
+        invalid_dir = self.training_data_dir / "invalid"
+        if invalid_dir.exists():
+            image_files = sorted(invalid_dir.glob("*.jpg"))
+            if image_files:
+                templates = []
+                for img_file in image_files:
+                    try:
+                        img = cv2.imread(str(img_file), cv2.IMREAD_GRAYSCALE)
+                        if img is not None:
+                            templates.append(img)
+                    except Exception as e:
+                        logger.warning(f"Failed to load invalid template {img_file}: {e}")
+
+                if templates:
+                    self.templates["invalid"] = templates
+
+        logger.debug(f"Loaded templates for {len(self.templates)} categories (including invalid if present)")
 
     def get_coverage_stats(self) -> Dict:
         """
@@ -119,13 +141,13 @@ class TemplateClassifier:
             "collection_enabled": self.collection_enabled
         }
 
-    def save_labeled_image(self, image_data: bytes, percentage: int) -> bool:
+    def save_labeled_image(self, image_data: bytes, category) -> bool:
         """
         Save a labeled image to training data with FIFO rotation
 
         Args:
             image_data: Raw image bytes (JPEG)
-            percentage: Labeled percentage (0-100)
+            category: Labeled category (0-100 or "invalid")
 
         Returns:
             True if saved successfully, False otherwise
@@ -134,20 +156,21 @@ class TemplateClassifier:
             logger.debug("Collection disabled, skipping image save")
             return False
 
-        if not (0 <= percentage <= 100):
-            logger.warning(f"Invalid percentage {percentage}, must be 0-100")
+        # Validate category
+        if category != "invalid" and not (isinstance(category, int) and 0 <= category <= 100):
+            logger.warning(f"Invalid category {category}, must be 0-100 or 'invalid'")
             return False
 
         try:
-            percentage_dir = self.training_data_dir / str(percentage)
-            percentage_dir.mkdir(parents=True, exist_ok=True)
+            category_dir = self.training_data_dir / str(category)
+            category_dir.mkdir(parents=True, exist_ok=True)
 
             # Generate timestamp-based filename
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            image_path = percentage_dir / f"{timestamp}.jpg"
+            image_path = category_dir / f"{timestamp}.jpg"
 
             # Check if we need to delete oldest image (FIFO rotation)
-            existing_images = sorted(percentage_dir.glob("*.jpg"))
+            existing_images = sorted(category_dir.glob("*.jpg"))
             if len(existing_images) >= self.max_images_per_percentage:
                 # Delete oldest image(s) to make room
                 num_to_delete = len(existing_images) - self.max_images_per_percentage + 1
@@ -170,7 +193,7 @@ class TemplateClassifier:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to save labeled image for {percentage}%: {e}")
+            logger.error(f"Failed to save labeled image for {category}: {e}")
             return False
 
     def _compute_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
@@ -212,7 +235,8 @@ class TemplateClassifier:
             image_data: Raw image bytes (JPEG)
 
         Returns:
-            Dictionary with classification results, or None if not enough templates
+            Dictionary with classification results, or None if image matches "invalid" template
+            None indicates the calling code should skip this cycle silently
         """
         if not self.templates:
             return {
@@ -236,30 +260,35 @@ class TemplateClassifier:
                 }
 
             # Compare against all templates
-            best_percentage = None
+            best_category = None
             best_confidence = 0.0
             all_scores = {}
 
-            for percentage, templates in self.templates.items():
-                # Compute average similarity across all templates for this percentage
+            for category, templates in self.templates.items():
+                # Compute average similarity across all templates for this category
                 similarities = []
                 for template in templates:
                     similarity = self._compute_similarity(test_image, template)
                     similarities.append(similarity)
 
                 avg_similarity = np.mean(similarities) if similarities else 0.0
-                all_scores[percentage] = round(avg_similarity, 4)
+                all_scores[category] = round(avg_similarity, 4)
 
                 if avg_similarity > best_confidence:
                     best_confidence = avg_similarity
-                    best_percentage = percentage
+                    best_category = category
+
+            # Check if best match is "invalid" category
+            if best_category == "invalid":
+                logger.debug("Image matched invalid template, skipping cycle")
+                return None  # Signal to skip this cycle
 
             # Get top 3 matches for debugging
             top_3 = sorted(all_scores.items(), key=lambda x: x[1], reverse=True)[:3]
 
             return {
                 "success": True,
-                "percentage": best_percentage,
+                "percentage": best_category,
                 "confidence": round(best_confidence, 4),
                 "top_3_matches": dict(top_3),
                 "total_templates_checked": len(self.templates)
@@ -284,18 +313,18 @@ class TemplateClassifier:
         self.collection_enabled = enabled
         logger.info(f"Collection {'enabled' if enabled else 'disabled'}")
 
-    def manually_label_image(self, image_data: bytes, percentage: int) -> bool:
+    def manually_label_image(self, image_data: bytes, category) -> bool:
         """
         Manually label/relabel an image
 
         Args:
             image_data: Raw image bytes
-            percentage: Correct percentage label (0-100)
+            category: Correct category label (0-100 or "invalid")
 
         Returns:
             True if saved successfully
         """
-        return self.save_labeled_image(image_data, percentage)
+        return self.save_labeled_image(image_data, category)
 
 
 # Global instance
@@ -315,14 +344,18 @@ def get_training_status() -> Dict:
     return stats
 
 
-def log_comparison(gemini_percentage: int, template_result: Dict):
+def log_comparison(gemini_percentage: int, template_result: Optional[Dict]):
     """
     Log comparison between Gemini and template matching results
 
     Args:
         gemini_percentage: Percentage from Gemini API
-        template_result: Result dictionary from template matching
+        template_result: Result dictionary from template matching, or None if invalid match
     """
+    if template_result is None:
+        logger.info(f"[COMPARE] Gemini: {gemini_percentage}% | Template: INVALID (image matched invalid template)")
+        return
+
     if not template_result["success"]:
         logger.info(f"[COMPARE] Gemini: {gemini_percentage}% | Template: FAILED ({template_result.get('error', 'unknown error')})")
         return
