@@ -897,12 +897,12 @@ async def background_worker():
             # Discover devices at start of each cycle
             discovery_result = device_discovery.discover_devices()
 
-            # Query device states and check monitoring mode at start of each cycle
+            # Query device states once and reuse for monitoring mode checks
             device_states = get_device_states()
 
-            # Check if any inputs or outputs are on
-            input_on = device_discovery.is_any_input_on()
-            output_on = device_discovery.is_any_output_on()
+            # Check if any inputs or outputs are on (pass states to avoid redundant API calls)
+            input_on = device_discovery.is_any_input_on(device_states)
+            output_on = device_discovery.is_any_output_on(device_states)
             is_daylight = switchbot_controller._is_daylight_hours()
 
             # Determine current monitoring mode
@@ -1056,7 +1056,7 @@ async def background_worker():
             time_since_perfect = current_time - last_perfect_reading_time
             if time_since_perfect < cooldown_seconds:
                 remaining_cooldown = cooldown_seconds - time_since_perfect
-                logger.debug(f"⏸️  In cooldown period after 100% confidence reading - {remaining_cooldown:.0f}s remaining")
+                logger.info(f"⏸️  Cooldown: {remaining_cooldown:.0f}s remaining")
                 await asyncio.sleep(polling_interval)
                 continue
 

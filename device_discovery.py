@@ -26,6 +26,8 @@ class DeviceDiscovery:
         self._inputs: List[Dict] = []
         self._outputs: List[Dict] = []
         self._last_discovery_time: Optional[float] = None
+        self._last_input_count: int = -1  # Track for change detection
+        self._last_output_count: int = -1
 
     def discover_devices(self) -> Dict:
         """
@@ -69,11 +71,17 @@ class DeviceDiscovery:
             self._outputs = outputs
             self._last_discovery_time = datetime.now().timestamp()
 
-            logger.info(f"Device discovery: found {len(inputs)} input(s), {len(outputs)} output(s)")
-            if inputs:
-                logger.debug(f"  Inputs: {[d.get('name') for d in inputs]}")
-            if outputs:
-                logger.debug(f"  Outputs: {[d.get('name') for d in outputs]}")
+            # Only log at INFO level when device counts change
+            if len(inputs) != self._last_input_count or len(outputs) != self._last_output_count:
+                logger.info(f"Device discovery: found {len(inputs)} input(s), {len(outputs)} output(s)")
+                if inputs:
+                    logger.info(f"  Inputs: {[d.get('name') for d in inputs]}")
+                if outputs:
+                    logger.info(f"  Outputs: {[d.get('name') for d in outputs]}")
+                self._last_input_count = len(inputs)
+                self._last_output_count = len(outputs)
+            else:
+                logger.debug(f"Device discovery: {len(inputs)} input(s), {len(outputs)} output(s) (unchanged)")
 
             return {
                 "success": True,
@@ -183,17 +191,27 @@ class DeviceDiscovery:
             logger.warning(f"Error getting device states: {e}")
             return {}
 
-    def is_any_input_on(self) -> bool:
-        """Check if any input device is currently on"""
-        states = self.get_device_states()
+    def is_any_input_on(self, states: Dict[str, bool] = None) -> bool:
+        """Check if any input device is currently on
+
+        Args:
+            states: Optional pre-fetched device states to avoid extra API call
+        """
+        if states is None:
+            states = self.get_device_states()
         return any(
             states.get(device.get("name"), False)
             for device in self._inputs
         )
 
-    def is_any_output_on(self) -> bool:
-        """Check if any output device is currently on"""
-        states = self.get_device_states()
+    def is_any_output_on(self, states: Dict[str, bool] = None) -> bool:
+        """Check if any output device is currently on
+
+        Args:
+            states: Optional pre-fetched device states to avoid extra API call
+        """
+        if states is None:
+            states = self.get_device_states()
         return any(
             states.get(device.get("name"), False)
             for device in self._outputs
