@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 from gemini_ocr import gemini_ocr
 from groq_ocr import groq_ocr
 from switchbot_controller import switchbot_controller
+from device_discovery import device_discovery
+from recommendations import calculate_device_recommendations, analyze_recent_readings_for_recommendations
 
 load_dotenv()
 
@@ -647,13 +649,34 @@ async def gemini_ocr_analysis_with_voting() -> Dict:
             "total_attempts": 3
         }
 
-def get_device_states():
+def is_controllable_device(device_name: str) -> bool:
     """
-    Query device states from the device control API
+    Check if device should be controlled during calibration.
+
+    Only devices with 'light', 'input', or 'output' in their names are considered
+    safe for automated control. This prevents accidentally controlling critical
+    infrastructure like desktop computers or servers.
+
+    Args:
+        device_name: Name of the device to check
 
     Returns:
-        dict: Dictionary with device states, e.g., {"input": False, "output_2": True}
-              Returns empty dict on error
+        bool: True if device is safe to control, False otherwise
+    """
+    if not device_name:
+        return False
+
+    name_lower = device_name.lower()
+    controllable_keywords = ['light', 'input', 'output']
+    return any(keyword in name_lower for keyword in controllable_keywords)
+
+def get_all_devices():
+    """
+    Query all devices from the device control API.
+
+    Returns:
+        list: List of device dictionaries with name and state information
+              Returns empty list on error
     """
     control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
     control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
@@ -668,23 +691,49 @@ def get_device_states():
 
         if response.status_code == 200:
             data = response.json()
-            devices = data.get("devices", [])
-
-            # Extract states for input and output_2
-            states = {}
-            for device in devices:
-                name = device.get("name")
-                if name in ["input", "output_2"]:
-                    states[name] = device.get("known_state", False)
-
-            return states
+            return data.get("devices", [])
         else:
-            logger.warning(f"Failed to get device states: HTTP {response.status_code}")
-            return {}
+            logger.warning(f"Failed to get devices: HTTP {response.status_code}")
+            return []
 
     except Exception as e:
-        logger.warning(f"Error getting device states: {e}")
-        return {}
+        logger.warning(f"Error getting devices: {e}")
+        return []
+
+def get_controllable_devices():
+    """
+    Query and filter devices that are safe for automated control.
+
+    Returns:
+        list: List of device names that match controllable patterns (light/input/output)
+    """
+    all_devices = get_all_devices()
+    controllable = []
+    skipped = []
+
+    for device in all_devices:
+        name = device.get("name", "")
+        if is_controllable_device(name):
+            controllable.append(name)
+        else:
+            skipped.append(name)
+
+    if controllable:
+        logger.debug(f"Controllable devices: {', '.join(controllable)}")
+    if skipped:
+        logger.debug(f"Skipped devices (not light/input/output): {', '.join(skipped)}")
+
+    return controllable
+
+def get_device_states():
+    """
+    Query device states from the device control API using dynamic discovery
+
+    Returns:
+        dict: Dictionary with device states, e.g., {"input": False, "output_2": True}
+              Returns empty dict on error
+    """
+    return device_discovery.get_device_states()
 
 async def control_device(device_name: str, turn_on: bool, force: bool = False):
     """
@@ -840,35 +889,70 @@ def analyze_recent_readings_for_recommendations(readings_last_30min: List[Dict])
 
 async def control_devices_based_on_battery(battery_percentage: int, force: bool = False):
     """
-    Control devices based on battery percentage using shared recommendation logic
-    
+    Control devices based on battery percentage using shared recommendation logic.
+
+    Only controls devices that are safe for automated control (containing 'light',
+    'input', or 'output' in their names). This prevents accidentally controlling
+    critical infrastructure like computers and servers during startup calibration.
+
     Args:
         battery_percentage: Current battery percentage
-        force: Force device commands regardless of current state
+        force: Force device commands regardless of current state (used for startup calibration)
     """
     result = calculate_device_recommendations(battery_percentage)
     recommendations = result["recommendations"]
     reasoning = result["reasoning"]
-    
+
     if force:
-        logger.debug(f"Device control decision (FORCED): {reasoning}")
+        logger.info(f"🔄 Startup calibration: {reasoning}")
+        # Get list of controllable devices from the API
+        controllable_devices = get_controllable_devices()
+        logger.info(f"🔒 Calibration safety filter: only controlling devices with light/input/output in names")
+
+        # Filter recommendations to only include controllable devices
+        filtered_recommendations = {}
+        skipped_recommendations = {}
+
+        for device_name, action in recommendations.items():
+            if is_controllable_device(device_name):
+                # Double-check device exists in the API's device list
+                if device_name in controllable_devices:
+                    filtered_recommendations[device_name] = action
+                else:
+                    logger.debug(f"  ⚠️  Skipping {device_name}: recommended but not found in device API")
+            else:
+                skipped_recommendations[device_name] = action
+
+        if skipped_recommendations:
+            skipped_names = ', '.join(skipped_recommendations.keys())
+            logger.info(f"  ⏭️  Skipped non-controllable devices: {skipped_names}")
+
+        if filtered_recommendations:
+            controlled_names = ', '.join(filtered_recommendations.keys())
+            logger.info(f"  ✅ Calibrating controllable devices: {controlled_names}")
+        else:
+            logger.warning("  ⚠️  No controllable devices found to calibrate!")
+
+        recommendations = filtered_recommendations
     else:
         logger.debug(f"Device control decision: {reasoning}")
-    
-    # Control each device based on recommendations
+
+    # Control each device based on (filtered) recommendations
     success_count = 0
-    total_devices = 0
-    
+    total_devices = len(recommendations)
+
     for device_name, action in recommendations.items():
-        total_devices += 1
         turn_on = action == "turn_on"
-        
+
         if await control_device(device_name, turn_on, force=force):
             success_count += 1
         else:
             logger.error(f"Failed to control {device_name}")
-    
-    if success_count == total_devices:
+
+    if total_devices == 0:
+        logger.debug("No devices to control")
+        return True
+    elif success_count == total_devices:
         logger.debug(f"Successfully controlled all {total_devices} devices")
         return True
     else:
