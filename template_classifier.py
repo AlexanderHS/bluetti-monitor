@@ -7,7 +7,7 @@ battery percentage recognition (0-100%).
 
 Two modes:
 1. Collection mode: Always active - saves labeled images from Gemini
-2. Comparison mode: Activates at 50% coverage - logs predictions alongside Gemini
+2. Comparison mode: Activates at 25% coverage - logs predictions alongside Gemini
 """
 
 import os
@@ -35,7 +35,7 @@ class TemplateClassifier:
         """
         self.training_data_dir = Path(training_data_dir)
         self.max_images_per_percentage = 10  # FIFO rotation limit
-        self.comparison_threshold = 0.50  # 50% coverage to enable comparison mode
+        self.comparison_threshold = 0.25  # 25% coverage to enable comparison mode
         self.collection_enabled = True  # Collection always active by default
 
         # Template cache: {percentage: [template_images]}
