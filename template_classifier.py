@@ -34,8 +34,10 @@ class TemplateClassifier:
             training_data_dir: Directory to store training images (default: ./training_data)
         """
         self.training_data_dir = Path(training_data_dir)
-        self.max_images_per_percentage = 10  # FIFO rotation limit
-        self.comparison_threshold = 0.25  # 25% coverage to enable comparison mode
+
+        # Read configuration from environment
+        self.max_images_per_percentage = int(os.getenv("MAX_IMAGES_PER_CATEGORY", "10"))
+        self.comparison_threshold = float(os.getenv("COMPARISON_MODE_THRESHOLD", "0.25"))
         self.collection_enabled = True  # Collection always active by default
 
         # Template cache: {percentage: [template_images]}
@@ -64,6 +66,51 @@ class TemplateClassifier:
 
         logger.debug(f"Initialized {self.training_data_dir} with 0-100 subdirectories + invalid")
 
+    def is_verified(self, filename: str) -> bool:
+        """
+        Check if a filename indicates a verified image.
+
+        Args:
+            filename: Filename to check (e.g., "image.jpg" or "image.verified.jpg")
+
+        Returns:
+            True if filename contains ".verified." suffix
+        """
+        return ".verified." in filename
+
+    def mark_verified(self, filepath: Path) -> bool:
+        """
+        Mark an image file as verified by adding .verified. suffix.
+
+        Args:
+            filepath: Path to the image file
+
+        Returns:
+            True if successfully renamed, False otherwise
+        """
+        if not filepath.exists():
+            logger.warning(f"Cannot mark as verified - file not found: {filepath}")
+            return False
+
+        if self.is_verified(filepath.name):
+            logger.debug(f"File already verified: {filepath.name}")
+            return True
+
+        # Insert ".verified" before the extension
+        # e.g., "20231201_123456_789012.jpg" -> "20231201_123456_789012.verified.jpg"
+        stem = filepath.stem
+        suffix = filepath.suffix
+        new_name = f"{stem}.verified{suffix}"
+        new_path = filepath.parent / new_name
+
+        try:
+            filepath.rename(new_path)
+            logger.info(f"Marked as verified: {filepath.name} -> {new_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to mark as verified: {e}")
+            return False
+
     def _load_templates(self):
         """Load all existing training images into memory as templates"""
         self.templates.clear()
@@ -74,7 +121,7 @@ class TemplateClassifier:
             if not percentage_dir.exists():
                 continue
 
-            # Load all images for this percentage
+            # Load all images for this percentage (including verified ones)
             image_files = sorted(percentage_dir.glob("*.jpg"))
             if image_files:
                 templates = []
@@ -165,18 +212,30 @@ class TemplateClassifier:
             category_dir = self.training_data_dir / str(category)
             category_dir.mkdir(parents=True, exist_ok=True)
 
-            # Generate timestamp-based filename
+            # Generate timestamp-based filename (new images are always unverified)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             image_path = category_dir / f"{timestamp}.jpg"
 
-            # Check if we need to delete oldest image (FIFO rotation)
+            # Check if we need to delete oldest image (Smart FIFO rotation)
             existing_images = sorted(category_dir.glob("*.jpg"))
             if len(existing_images) >= self.max_images_per_percentage:
-                # Delete oldest image(s) to make room
+                # Smart FIFO: prefer deleting unverified images
+                unverified_images = [img for img in existing_images if not self.is_verified(img.name)]
+                verified_images = [img for img in existing_images if self.is_verified(img.name)]
+
                 num_to_delete = len(existing_images) - self.max_images_per_percentage + 1
-                for old_image in existing_images[:num_to_delete]:
-                    old_image.unlink()
-                    logger.debug(f"FIFO rotation: deleted {old_image.name}")
+
+                if unverified_images:
+                    # Delete oldest unverified image(s) first
+                    for old_image in unverified_images[:num_to_delete]:
+                        old_image.unlink()
+                        logger.debug(f"FIFO rotation: deleted unverified {old_image.name}")
+                elif verified_images:
+                    # Only delete verified images if ALL images are verified
+                    logger.info(f"All images in {category} are verified, deleting oldest verified image")
+                    for old_image in verified_images[:num_to_delete]:
+                        old_image.unlink()
+                        logger.debug(f"FIFO rotation: deleted verified {old_image.name}")
 
             # Save new image
             with open(image_path, 'wb') as f:

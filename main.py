@@ -1628,15 +1628,16 @@ async def manually_label_last_image(category: str):
 
 
 @app.get("/training/images")
-async def list_training_images(category: str = None):
+async def list_training_images(category: str = None, filter: str = "all"):
     """
-    List all training images, optionally filtered by category.
+    List all training images, optionally filtered by category and verification status.
 
     Args:
         category: Optional filter for specific category (0-100 or "invalid")
+        filter: "all" or "unverified" (default: "all")
 
     Returns:
-        Dictionary with images grouped by category
+        Dictionary with images grouped by category, including verified status
     """
     try:
         training_dir = Path(template_classifier.training_data_dir)
@@ -1654,7 +1655,22 @@ async def list_training_images(category: str = None):
             if cat_dir.exists():
                 images = sorted(cat_dir.glob("*.jpg"), key=lambda x: x.stat().st_mtime, reverse=True)
                 if images:
-                    result[cat] = [img.name for img in images]
+                    # Build list with verified status
+                    image_list = []
+                    for img in images:
+                        is_verified = template_classifier.is_verified(img.name)
+
+                        # Apply filter
+                        if filter == "unverified" and is_verified:
+                            continue
+
+                        image_list.append({
+                            "filename": img.name,
+                            "verified": is_verified
+                        })
+
+                    if image_list:
+                        result[cat] = image_list
 
         return {"success": True, "images": result}
     except Exception as e:
@@ -1747,15 +1763,37 @@ async def reclassify_training_image(
         # Ensure target directory exists
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check FIFO - if target has 10+ images, delete oldest
+        # Check FIFO - if target has max images, apply smart deletion
         existing_images = sorted(target_dir.glob("*.jpg"))
         if len(existing_images) >= template_classifier.max_images_per_percentage:
-            oldest = existing_images[0]
-            oldest.unlink()
-            logger.info(f"FIFO rotation in {to_category}/: deleted {oldest.name}")
+            # Smart FIFO: prefer deleting unverified images
+            unverified_images = [img for img in existing_images if not template_classifier.is_verified(img.name)]
+            verified_images = [img for img in existing_images if template_classifier.is_verified(img.name)]
+
+            if unverified_images:
+                oldest = unverified_images[0]
+                oldest.unlink()
+                logger.info(f"FIFO rotation in {to_category}/: deleted unverified {oldest.name}")
+            elif verified_images:
+                oldest = verified_images[0]
+                oldest.unlink()
+                logger.info(f"FIFO rotation in {to_category}/: deleted verified {oldest.name}")
 
         # Move the file
         shutil.move(str(source_path), str(target_path))
+
+        # Mark as verified (reclassification implies human review)
+        # Remove .verified. from filename first if present, then add it back
+        final_path = target_path
+        if not template_classifier.is_verified(target_path.name):
+            # Add .verified. suffix
+            stem = target_path.stem
+            suffix = target_path.suffix
+            verified_name = f"{stem}.verified{suffix}"
+            verified_path = target_dir / verified_name
+            target_path.rename(verified_path)
+            final_path = verified_path
+            logger.info(f"Auto-verified after reclassification: {verified_name}")
 
         # Reload templates
         template_classifier._load_templates()
@@ -1818,6 +1856,118 @@ async def delete_training_image(category: str, filename: str):
         return {"success": False, "error": str(e)}
 
 
+@app.post("/training/verify/{category}/{filename}")
+async def verify_training_image(category: str, filename: str):
+    """
+    Mark a specific training image as verified.
+
+    Args:
+        category: The category folder (0-100 or "invalid")
+        filename: The image filename
+
+    Returns:
+        Success status
+    """
+    try:
+        # Validate category
+        if category != "invalid":
+            try:
+                cat_int = int(category)
+                if not (0 <= cat_int <= 100):
+                    return {"success": False, "error": "Invalid category"}
+            except ValueError:
+                return {"success": False, "error": "Invalid category"}
+
+        training_dir = Path(template_classifier.training_data_dir)
+        image_path = training_dir / str(category) / filename
+
+        if not image_path.exists():
+            return {"success": False, "error": "Image not found"}
+
+        # Security check
+        if not str(image_path.resolve()).startswith(str(training_dir.resolve())):
+            return {"success": False, "error": "Invalid path"}
+
+        # Mark as verified
+        success = template_classifier.mark_verified(image_path)
+
+        if success:
+            # Reload templates
+            template_classifier._load_templates()
+
+            return {
+                "success": True,
+                "message": f"Marked {filename} as verified"
+            }
+        else:
+            return {"success": False, "error": "Failed to mark as verified"}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/training/verify-all")
+async def verify_all_images(categories: str = Form(...)):
+    """
+    Verify all visible images in specified categories (bulk action).
+
+    Args:
+        categories: JSON string with category list (e.g., '["50", "51"]')
+
+    Returns:
+        Success status with count of verified images
+    """
+    try:
+        import json
+        category_list = json.loads(categories)
+
+        training_dir = Path(template_classifier.training_data_dir)
+        verified_count = 0
+        failed_count = 0
+
+        for category in category_list:
+            # Validate category
+            if category != "invalid":
+                try:
+                    cat_int = int(category)
+                    if not (0 <= cat_int <= 100):
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
+            cat_dir = training_dir / str(category)
+            if cat_dir.exists():
+                images = list(cat_dir.glob("*.jpg"))
+                for img_path in images:
+                    # Skip already verified images
+                    if template_classifier.is_verified(img_path.name):
+                        continue
+
+                    # Security check
+                    if not str(img_path.resolve()).startswith(str(training_dir.resolve())):
+                        continue
+
+                    success = template_classifier.mark_verified(img_path)
+                    if success:
+                        verified_count += 1
+                    else:
+                        failed_count += 1
+
+        # Reload templates
+        template_classifier._load_templates()
+
+        return {
+            "success": True,
+            "message": f"Verified {verified_count} images" + (f" ({failed_count} failed)" if failed_count > 0 else ""),
+            "verified_count": verified_count,
+            "failed_count": failed_count
+        }
+
+    except Exception as e:
+        logger.error(f"Verify all failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/training/review", response_class=HTMLResponse)
 async def training_review_ui():
     """
@@ -1864,12 +2014,24 @@ async def training_review_ui():
         .image-card {
             background: #16213e; border-radius: 8px; overflow: hidden;
             cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;
+            position: relative;
         }
         .image-card:hover { transform: translateY(-3px); box-shadow: 0 5px 20px rgba(0,212,255,0.3); }
         .image-card.selected { box-shadow: 0 0 0 3px #00d4ff; }
         .image-card img { width: 100%; height: 150px; object-fit: cover; }
         .image-card .info { padding: 10px; font-size: 0.85em; }
         .image-card .filename { color: #888; word-break: break-all; }
+        .verified-badge {
+            position: absolute; top: 8px; right: 8px;
+            background: #28a745; color: white; padding: 4px 8px;
+            border-radius: 4px; font-size: 0.75em; font-weight: bold;
+        }
+        .verify-btn {
+            background: #28a745; color: white; padding: 5px 10px;
+            border: none; border-radius: 3px; cursor: pointer;
+            font-size: 0.9em; margin-top: 5px;
+        }
+        .verify-btn:hover { background: #218838; }
         .modal {
             display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0,0,0,0.9); z-index: 1000; justify-content: center; align-items: center;
@@ -1934,7 +2096,13 @@ async def training_review_ui():
         <select id="percentage-filter">
             <option value="all">All with images</option>
         </select>
+        <label style="margin-left: 20px;">Filter:</label>
+        <select id="verification-filter">
+            <option value="unverified">Unverified only</option>
+            <option value="all">All images</option>
+        </select>
         <button onclick="loadImages()">Refresh</button>
+        <button onclick="verifyAllVisible()" style="background: #28a745;">Verify All Visible</button>
     </div>
 
     <div class="grid" id="image-grid"></div>
@@ -1978,7 +2146,8 @@ async def training_review_ui():
 
         async function loadImages() {
             try {
-                const res = await fetch('/training/images');
+                const verificationFilter = document.getElementById('verification-filter').value;
+                const res = await fetch(`/training/images?filter=${verificationFilter}`);
                 const data = await res.json();
                 if (data.success) {
                     allImages = data.images;
@@ -2001,7 +2170,8 @@ async def training_review_ui():
                 if (b === 'invalid') return 1;
                 return parseInt(a) - parseInt(b);
             }).forEach(cat => {
-                const count = allImages[cat].length;
+                const images = allImages[cat];
+                const count = images.length;
                 const opt = document.createElement('option');
                 opt.value = cat;
                 const displayLabel = cat === 'invalid' ? 'invalid' : cat + '%';
@@ -2033,14 +2203,21 @@ async def training_review_ui():
 
             categories.forEach(cat => {
                 if (!allImages[cat]) return;
-                allImages[cat].forEach(filename => {
+                allImages[cat].forEach(imageData => {
+                    const filename = imageData.filename;
+                    const isVerified = imageData.verified;
                     const displayLabel = cat === 'invalid' ? 'invalid' : cat + '%';
+                    const verifiedBadge = isVerified ? '<div class="verified-badge">✓ Verified</div>' : '';
+                    const verifyButton = !isVerified ? `<button class="verify-btn" onclick="event.stopPropagation(); verifyImage('${cat}', '${filename}')">Verify</button>` : '';
+
                     html += `
                         <div class="image-card" onclick="openModal('${cat}', '${filename}')">
+                            ${verifiedBadge}
                             <img src="/training/image/${cat}/${filename}" alt="${displayLabel}" loading="lazy">
                             <div class="info">
                                 <strong>${displayLabel}</strong>
                                 <div class="filename">${filename}</div>
+                                ${verifyButton}
                             </div>
                         </div>
                     `;
@@ -2136,8 +2313,64 @@ async def training_review_ui():
             setTimeout(() => toast.classList.remove('show'), 3000);
         }
 
+        async function verifyImage(category, filename) {
+            try {
+                const res = await fetch(`/training/verify/${category}/${filename}`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast('Image verified');
+                    loadImages();
+                    loadStats();
+                } else {
+                    showToast(data.error || 'Failed to verify', true);
+                }
+            } catch (e) {
+                showToast('Error: ' + e.message, true);
+            }
+        }
+
+        async function verifyAllVisible() {
+            try {
+                const filter = document.getElementById('percentage-filter').value;
+
+                // Determine which categories are visible
+                let categoriesToVerify = [];
+                if (filter === 'all') {
+                    categoriesToVerify = Object.keys(allImages);
+                } else {
+                    categoriesToVerify = [filter];
+                }
+
+                if (categoriesToVerify.length === 0) {
+                    showToast('No images to verify', true);
+                    return;
+                }
+
+                const res = await fetch('/training/verify-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `categories=${encodeURIComponent(JSON.stringify(categoriesToVerify))}`
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast(data.message);
+                    loadImages();
+                    loadStats();
+                } else {
+                    showToast(data.error || 'Failed to verify all', true);
+                }
+            } catch (e) {
+                showToast('Error: ' + e.message, true);
+            }
+        }
+
         // Event listeners
         document.getElementById('percentage-filter').addEventListener('change', renderImages);
+        document.getElementById('verification-filter').addEventListener('change', loadImages);
         document.getElementById('modal').addEventListener('click', (e) => {
             if (e.target.id === 'modal') closeModal();
         });
