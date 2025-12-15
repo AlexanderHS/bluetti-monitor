@@ -2043,10 +2043,16 @@ async def verify_all_images(categories: str = Form(...)):
 
 
 @app.get("/comparisons/stats")
-async def get_comparison_stats():
-    """Get aggregated comparison statistics"""
+async def get_comparison_stats(since_hours: float = None):
+    """
+    Get aggregated comparison statistics
+
+    Args:
+        since_hours: Optional time filter - only include records from the last N hours
+                     (e.g., 1 for last hour, 24 for last day, 168 for last week)
+    """
     try:
-        stats = await comparison_storage.get_statistics()
+        stats = await comparison_storage.get_statistics(since_hours=since_hours)
         return {"success": True, **stats}
     except Exception as e:
         return {"success": False, "error": f"Failed to get comparison stats: {str(e)}"}
@@ -2342,6 +2348,17 @@ async def training_review_ui():
 
     <!-- Comparison Stats Tab -->
     <div id="comparisons-tab" class="tab-content">
+        <div class="controls" style="margin-bottom: 20px;">
+            <label for="time-filter" style="margin-right: 10px;">Time Range:</label>
+            <select id="time-filter" onchange="loadComparisonStats(); loadComparisonRecords();">
+                <option value="">All Time</option>
+                <option value="1">Last Hour</option>
+                <option value="6">Last 6 Hours</option>
+                <option value="24" selected>Last 24 Hours</option>
+                <option value="72">Last 3 Days</option>
+                <option value="168">Last Week</option>
+            </select>
+        </div>
         <div class="summary-cards">
             <div class="summary-card" id="total-comparisons-card">
                 <div class="value" id="total-comparisons">-</div>
@@ -2363,7 +2380,7 @@ async def training_review_ui():
             </div>
             <div class="summary-card">
                 <div class="value" id="recent-disagreements">-</div>
-                <div class="label">Recent Disagreements (24h)</div>
+                <div class="label" id="recent-disagreements-label">Recent Disagreements (24h)</div>
             </div>
         </div>
 
@@ -2700,7 +2717,9 @@ async def training_review_ui():
         // Load comparison statistics
         async function loadComparisonStats() {
             try {
-                const res = await fetch('/comparisons/stats');
+                const timeFilter = document.getElementById('time-filter').value;
+                const url = timeFilter ? `/comparisons/stats?since_hours=${timeFilter}` : '/comparisons/stats';
+                const res = await fetch(url);
                 const data = await res.json();
 
                 if (data.success) {
@@ -2708,6 +2727,18 @@ async def training_review_ui():
                     document.getElementById('total-comparisons').textContent = data.total_comparisons;
                     document.getElementById('agreement-rate').textContent = (data.agreement_rate * 100).toFixed(1) + '%';
                     document.getElementById('recent-disagreements').textContent = data.recent_disagreements;
+
+                    // Update recent disagreements label based on time filter
+                    const timeFilterLabels = {
+                        '': 'Recent Disagreements (24h)',
+                        '1': 'Disagreements (1h)',
+                        '6': 'Disagreements (6h)',
+                        '24': 'Disagreements (24h)',
+                        '72': 'Disagreements (3d)',
+                        '168': 'Disagreements (1w)'
+                    };
+                    document.getElementById('recent-disagreements-label').textContent =
+                        timeFilterLabels[timeFilter] || 'Disagreements';
 
                     // Color-code agreement rate
                     const rateCard = document.getElementById('agreement-rate-card');

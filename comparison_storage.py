@@ -192,48 +192,62 @@ class ComparisonStorage:
         except Exception as e:
             logger.error(f"FIFO rotation failed: {e}")
 
-    async def get_statistics(self) -> Dict:
+    async def get_statistics(self, since_hours: float = None) -> Dict:
         """
         Get aggregated comparison statistics
+
+        Args:
+            since_hours: If provided, only include records from the last N hours
 
         Returns:
             Dictionary with statistics including by_value and by_llm_source breakdowns
         """
         try:
+            # Build time filter clause
+            time_filter = ""
+            time_params = []
+            if since_hours is not None:
+                since_timestamp = datetime.now().timestamp() - (since_hours * 60 * 60)
+                time_filter = " WHERE timestamp >= ?"
+                time_params = [since_timestamp]
+
             async with aiosqlite.connect(self.db_path) as db:
                 # Total comparisons and agreement rate
-                async with db.execute("""
+                async with db.execute(f"""
                     SELECT
                         COUNT(*) as total,
                         SUM(CASE WHEN agreement = 1 THEN 1 ELSE 0 END) as agreements
                     FROM comparison_records
-                """) as cursor:
+                    {time_filter}
+                """, time_params) as cursor:
                     row = await cursor.fetchone()
                     total_comparisons = row[0] if row else 0
                     agreements = row[1] if row else 0
                     agreement_rate = agreements / total_comparisons if total_comparisons > 0 else 0.0
 
                 # Human verified count
-                async with db.execute("""
+                time_and_filter = time_filter.replace("WHERE", "WHERE (human_verified_percentage IS NOT NULL OR human_verified_invalid = 1) AND") if time_filter else "WHERE human_verified_percentage IS NOT NULL OR human_verified_invalid = 1"
+                async with db.execute(f"""
                     SELECT COUNT(*)
                     FROM comparison_records
-                    WHERE human_verified_percentage IS NOT NULL OR human_verified_invalid = 1
-                """) as cursor:
+                    {time_and_filter}
+                """, time_params) as cursor:
                     row = await cursor.fetchone()
                     human_verified_count = row[0] if row else 0
 
                 # By value statistics (using LLM result as reference)
                 by_value = {}
-                async with db.execute("""
+                time_and_value_filter = time_filter.replace("WHERE", "WHERE COALESCE(gemini_percentage, groq_percentage) IS NOT NULL AND") if time_filter else "WHERE COALESCE(gemini_percentage, groq_percentage) IS NOT NULL"
+                async with db.execute(f"""
                     SELECT
                         COALESCE(gemini_percentage, groq_percentage) as value,
                         COUNT(*) as count,
                         SUM(CASE WHEN agreement = 1 THEN 1 ELSE 0 END) as agreements
                     FROM comparison_records
-                    WHERE COALESCE(gemini_percentage, groq_percentage) IS NOT NULL
+                    {time_and_value_filter}
                     GROUP BY value
                     ORDER BY value
-                """) as cursor:
+                """, time_params) as cursor:
                     async for row in cursor:
                         value, count, agreements = row
                         by_value[str(value)] = {
@@ -244,15 +258,16 @@ class ComparisonStorage:
 
                 # By LLM source statistics
                 by_llm_source = {}
-                async with db.execute("""
+                time_and_source_filter = time_filter.replace("WHERE", "WHERE llm_source IS NOT NULL AND") if time_filter else "WHERE llm_source IS NOT NULL"
+                async with db.execute(f"""
                     SELECT
                         llm_source,
                         COUNT(*) as count,
                         SUM(CASE WHEN agreement = 1 THEN 1 ELSE 0 END) as agreements
                     FROM comparison_records
-                    WHERE llm_source IS NOT NULL
+                    {time_and_source_filter}
                     GROUP BY llm_source
-                """) as cursor:
+                """, time_params) as cursor:
                     async for row in cursor:
                         source, count, agreements = row
                         # Ensure source is a string (SQLite might return bytes)
@@ -268,21 +283,26 @@ class ComparisonStorage:
                             "agreement_rate": round(agreements / count, 3) if count > 0 else 0.0
                         }
 
-                # Recent disagreements (last 24 hours)
-                twenty_four_hours_ago = datetime.now().timestamp() - (24 * 60 * 60)
+                # Recent disagreements (last 24 hours, or within filter window)
+                if since_hours is not None:
+                    # Use the same filter window
+                    recent_filter_timestamp = since_timestamp
+                else:
+                    # Default to last 24 hours
+                    recent_filter_timestamp = datetime.now().timestamp() - (24 * 60 * 60)
                 async with db.execute("""
                     SELECT COUNT(*)
                     FROM comparison_records
                     WHERE agreement = 0 AND timestamp >= ?
-                """, (twenty_four_hours_ago,)) as cursor:
+                """, (recent_filter_timestamp,)) as cursor:
                     row = await cursor.fetchone()
                     recent_disagreements = row[0] if row else 0
 
-                # Calculate accuracy metrics
-                accuracy_metrics = await self.calculate_accuracy_metrics()
+                # Calculate accuracy metrics (with time filter)
+                accuracy_metrics = await self.calculate_accuracy_metrics(since_hours=since_hours)
 
-                # Get error patterns
-                error_patterns = await self.get_error_patterns(limit=10)
+                # Get error patterns (with time filter)
+                error_patterns = await self.get_error_patterns(limit=10, since_hours=since_hours)
 
                 return {
                     "total_comparisons": total_comparisons,
@@ -292,7 +312,8 @@ class ComparisonStorage:
                     "error_patterns": error_patterns,
                     "by_value": by_value,
                     "by_llm_source": by_llm_source,
-                    "recent_disagreements": recent_disagreements
+                    "recent_disagreements": recent_disagreements,
+                    "time_filter_hours": since_hours
                 }
 
         except Exception as e:
@@ -500,21 +521,33 @@ class ComparisonStorage:
 
         return await self.update_human_verification(record_id, human_percentage, is_invalid)
 
-    async def calculate_accuracy_metrics(self) -> Dict:
+    async def calculate_accuracy_metrics(self, since_hours: float = None) -> Dict:
         """
         Calculate accuracy metrics for LLM and Template methods based on human-verified records
+
+        Args:
+            since_hours: If provided, only include records from the last N hours
 
         Returns:
             Dictionary with accuracy metrics for both methods
         """
         try:
+            # Build time filter
+            time_clause = ""
+            time_params = []
+            if since_hours is not None:
+                since_timestamp = datetime.now().timestamp() - (since_hours * 60 * 60)
+                time_clause = " AND timestamp >= ?"
+                time_params = [since_timestamp]
+
             async with aiosqlite.connect(self.db_path) as db:
                 # Count total human-verified records
-                async with db.execute("""
+                async with db.execute(f"""
                     SELECT COUNT(*)
                     FROM comparison_records
-                    WHERE human_verified_percentage IS NOT NULL OR human_verified_invalid = 1
-                """) as cursor:
+                    WHERE (human_verified_percentage IS NOT NULL OR human_verified_invalid = 1)
+                    {time_clause}
+                """, time_params) as cursor:
                     row = await cursor.fetchone()
                     total_verified = row[0] if row else 0
 
@@ -525,15 +558,16 @@ class ComparisonStorage:
                     }
 
                 # LLM accuracy
-                async with db.execute("""
+                async with db.execute(f"""
                     SELECT
                         COALESCE(gemini_percentage, groq_percentage) as llm_pct,
                         human_verified_percentage,
                         human_verified_invalid,
                         template_percentage
                     FROM comparison_records
-                    WHERE human_verified_percentage IS NOT NULL OR human_verified_invalid = 1
-                """) as cursor:
+                    WHERE (human_verified_percentage IS NOT NULL OR human_verified_invalid = 1)
+                    {time_clause}
+                """, time_params) as cursor:
                     rows = await cursor.fetchall()
 
                     llm_correct = 0
@@ -610,12 +644,13 @@ class ComparisonStorage:
                 "error": str(e)
             }
 
-    async def get_error_patterns(self, limit: int = 10) -> List[Dict]:
+    async def get_error_patterns(self, limit: int = 10, since_hours: float = None) -> List[Dict]:
         """
         Get most common error patterns for each method
 
         Args:
             limit: Maximum number of patterns to return per method
+            since_hours: If provided, only include records from the last N hours
 
         Returns:
             List of error pattern dictionaries
@@ -623,9 +658,17 @@ class ComparisonStorage:
         try:
             patterns = []
 
+            # Build time filter
+            time_clause = ""
+            time_params = []
+            if since_hours is not None:
+                since_timestamp = datetime.now().timestamp() - (since_hours * 60 * 60)
+                time_clause = " AND timestamp >= ?"
+                time_params = [since_timestamp]
+
             async with aiosqlite.connect(self.db_path) as db:
                 # LLM error patterns
-                async with db.execute("""
+                async with db.execute(f"""
                     SELECT
                         'llm' as method,
                         COALESCE(gemini_percentage, groq_percentage) as predicted,
@@ -640,10 +683,11 @@ class ComparisonStorage:
                             (human_verified_invalid = 1 AND COALESCE(gemini_percentage, groq_percentage) IS NOT NULL)
                             OR (human_verified_invalid = 0 AND COALESCE(gemini_percentage, groq_percentage) != human_verified_percentage)
                         )
+                        {time_clause}
                     GROUP BY predicted, actual
                     ORDER BY count DESC
                     LIMIT ?
-                """, (limit,)) as cursor:
+                """, (*time_params, limit)) as cursor:
                     async for row in cursor:
                         method, predicted, actual, count = row
                         # Handle potential bytes from SQLite with fallback encoding
@@ -665,7 +709,7 @@ class ComparisonStorage:
                         })
 
                 # Template error patterns
-                async with db.execute("""
+                async with db.execute(f"""
                     SELECT
                         'template' as method,
                         template_percentage as predicted,
@@ -680,10 +724,11 @@ class ComparisonStorage:
                             (human_verified_invalid = 1 AND template_percentage IS NOT NULL)
                             OR (human_verified_invalid = 0 AND template_percentage != human_verified_percentage)
                         )
+                        {time_clause}
                     GROUP BY predicted, actual
                     ORDER BY count DESC
                     LIMIT ?
-                """, (limit,)) as cursor:
+                """, (*time_params, limit)) as cursor:
                     async for row in cursor:
                         method, predicted, actual, count = row
                         # Handle potential bytes from SQLite with fallback encoding
