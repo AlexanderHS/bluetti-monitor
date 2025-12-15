@@ -390,27 +390,40 @@ class ComparisonStorage:
                                     return val.decode('latin-1')
                             return val
 
+                        # Helper to safely convert numeric fields that might be bytes
+                        def safe_int(val):
+                            if val is None:
+                                return None
+                            if isinstance(val, bytes):
+                                return int.from_bytes(val, 'little')
+                            return int(val) if val is not None else None
+
+                        def safe_float(val):
+                            if val is None:
+                                return None
+                            if isinstance(val, bytes):
+                                try:
+                                    return float(val.decode('utf-8'))
+                                except (UnicodeDecodeError, ValueError):
+                                    return float(int.from_bytes(val, 'little'))
+                            return float(val) if val is not None else None
+
                         # Handle potential bytes from SQLite for all text fields
                         image_filename = safe_decode(row[8])
                         llm_source = safe_decode(row[10])
 
                         # Handle boolean fields that might come back as bytes
-                        human_verified_invalid = row[7]
-                        if isinstance(human_verified_invalid, bytes):
-                            human_verified_invalid = int.from_bytes(human_verified_invalid, 'little')
-
-                        agreement = row[9]
-                        if isinstance(agreement, bytes):
-                            agreement = int.from_bytes(agreement, 'little')
+                        human_verified_invalid = safe_int(row[7])
+                        agreement = safe_int(row[9])
 
                         records.append({
-                            "id": row[0],
-                            "timestamp": row[1],
-                            "gemini_percentage": row[2],
-                            "groq_percentage": row[3],
-                            "template_percentage": row[4],
-                            "template_confidence": row[5],
-                            "human_verified_percentage": row[6],
+                            "id": safe_int(row[0]),
+                            "timestamp": safe_float(row[1]),
+                            "gemini_percentage": safe_int(row[2]),
+                            "groq_percentage": safe_int(row[3]),
+                            "template_percentage": safe_int(row[4]),
+                            "template_confidence": safe_float(row[5]),
+                            "human_verified_percentage": safe_int(row[6]),
                             "human_verified_invalid": bool(human_verified_invalid) if human_verified_invalid is not None else False,
                             "image_filename": image_filename,
                             "agreement": bool(agreement) if agreement is not None else False,
