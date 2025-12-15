@@ -10,6 +10,7 @@ import aiosqlite
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List
+from collections import defaultdict
 import json
 
 logger = logging.getLogger(__name__)
@@ -254,7 +255,9 @@ class ComparisonStorage:
                 """) as cursor:
                     async for row in cursor:
                         source, count, agreements = row
-                        by_llm_source[source] = {
+                        # Ensure source is a string (SQLite might return bytes)
+                        source_str = source.decode('utf-8') if isinstance(source, bytes) else str(source) if source else "unknown"
+                        by_llm_source[source_str] = {
                             "count": count,
                             "agreement_rate": round(agreements / count, 3) if count > 0 else 0.0
                         }
@@ -351,6 +354,14 @@ class ComparisonStorage:
 
                     records = []
                     for row in rows:
+                        # Handle potential bytes from SQLite
+                        image_filename = row[8]
+                        if isinstance(image_filename, bytes):
+                            image_filename = image_filename.decode('utf-8')
+                        llm_source = row[10]
+                        if isinstance(llm_source, bytes):
+                            llm_source = llm_source.decode('utf-8')
+
                         records.append({
                             "id": row[0],
                             "timestamp": row[1],
@@ -359,10 +370,10 @@ class ComparisonStorage:
                             "template_percentage": row[4],
                             "template_confidence": row[5],
                             "human_verified_percentage": row[6],
-                            "human_verified_invalid": bool(row[7]),
-                            "image_filename": row[8],
-                            "agreement": bool(row[9]),
-                            "llm_source": row[10]
+                            "human_verified_invalid": bool(row[7]) if row[7] is not None else False,
+                            "image_filename": image_filename,
+                            "agreement": bool(row[9]) if row[9] is not None else False,
+                            "llm_source": llm_source
                         })
 
                     return records
@@ -615,6 +626,11 @@ class ComparisonStorage:
                 """, (limit,)) as cursor:
                     async for row in cursor:
                         method, predicted, actual, count = row
+                        # Handle potential bytes from SQLite
+                        if isinstance(method, bytes):
+                            method = method.decode('utf-8')
+                        if isinstance(actual, bytes):
+                            actual = actual.decode('utf-8')
                         patterns.append({
                             "method": method,
                             "predicted": predicted if predicted is not None else "invalid",
@@ -644,6 +660,11 @@ class ComparisonStorage:
                 """, (limit,)) as cursor:
                     async for row in cursor:
                         method, predicted, actual, count = row
+                        # Handle potential bytes from SQLite
+                        if isinstance(method, bytes):
+                            method = method.decode('utf-8')
+                        if isinstance(actual, bytes):
+                            actual = actual.decode('utf-8')
                         patterns.append({
                             "method": method,
                             "predicted": predicted if predicted is not None else "invalid",
