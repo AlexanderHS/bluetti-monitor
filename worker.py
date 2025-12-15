@@ -27,6 +27,7 @@ from switchbot_controller import switchbot_controller
 from device_discovery import device_discovery
 from recommendations import calculate_device_recommendations, analyze_recent_readings_for_recommendations
 from template_classifier import template_classifier, log_comparison
+from comparison_storage import comparison_storage
 
 load_dotenv()
 
@@ -855,10 +856,37 @@ async def background_worker():
     db = BatteryDatabase(os.getenv("DATABASE_PATH", "./data/battery_readings.db"))
     await db.init_db()
 
+    # Initialize comparison storage
+    await comparison_storage.init_db()
+
     # Configuration
     polling_interval = int(os.getenv("POLLING_INTERVAL_SECONDS", 60))
     confidence_threshold = float(os.getenv("POLLING_CONFIDENCE_THRESHOLD", 1.0))  # Default to 100% confidence
     screen_tap_enabled = os.getenv("SCREEN_TAP_ENABLED", "true").lower() == "true"
+
+    # Strategy configuration
+    enable_gemini = os.getenv("ENABLE_GEMINI_STRATEGY", "true").lower() == "true"
+    enable_template = os.getenv("ENABLE_TEMPLATE_STRATEGY", "true").lower() == "true"
+    primary_strategy = os.getenv("PRIMARY_STRATEGY", "llm").lower()
+
+    # Validate strategy configuration
+    if not enable_gemini and not enable_template:
+        logger.error("ERROR: Both strategies disabled! Set ENABLE_GEMINI_STRATEGY=true or ENABLE_TEMPLATE_STRATEGY=true")
+        import sys
+        sys.exit(1)
+
+    # Log strategy configuration
+    strategy_msg = []
+    if enable_gemini:
+        strategy_msg.append("LLM (Gemini/Groq)")
+    if enable_template:
+        strategy_msg.append("Template Matching")
+    logger.info(f"Strategy configuration: Enabled={', '.join(strategy_msg)}, Primary={primary_strategy}")
+
+    if enable_gemini and enable_template:
+        logger.info("Comparison mode: Both strategies active - will log comparisons and store statistics")
+    else:
+        logger.info("Comparison mode: Single strategy - no comparison logging")
 
     # Cooldown configuration for 100% confidence readings
     cooldown_seconds = int(os.getenv("OCR_COOLDOWN_SECONDS", 60))  # Default 60 second cooldown
@@ -1062,41 +1090,126 @@ async def background_worker():
                 continue
 
             # If we get here, screen should be on - proceed with OCR
-            logger.debug("🎯 Screen is ON - Starting Gemini OCR analysis with majority voting")
+            logger.debug("🎯 Screen is ON - Running configured OCR strategies")
             start_time = time.time()
-            ocr_result = await gemini_ocr_analysis_with_voting()
-            processing_time = time.time() - start_time
 
-            if ocr_result["success"]:
-                battery_percentage = ocr_result["battery_percentage"]
-                confidence = ocr_result["confidence"]
+            # Variables to hold results from each strategy
+            gemini_result = None
+            groq_result = None
+            template_result = None
+            llm_source = "none"
 
-                # COLLECTION MODE: Save image with Gemini's label (always active)
+            # Strategy 1: Run LLM OCR if enabled
+            if enable_gemini:
+                logger.debug("Running LLM strategy (Gemini/Groq with voting)")
+                gemini_result = await gemini_ocr_analysis_with_voting()
+
+                # Determine which LLM was actually used
+                if gemini_result.get("success"):
+                    method = gemini_result.get("method", "gemini_direct_voting")
+                    if "groq" in method:
+                        llm_source = "groq"
+                    else:
+                        llm_source = "gemini"
+
+            # Strategy 2: Run template matching if enabled
+            processed_image = None
+            if enable_template:
                 try:
-                    # Capture and process image for collection (same as what Gemini saw)
+                    # Capture and process image for template matching
                     processed_image = capture_and_process_image_for_gemini()
-                    save_success = template_classifier.save_labeled_image(processed_image, battery_percentage)
+                    logger.debug("Running template matching strategy")
+                    template_result = template_classifier.classify_image(processed_image)
+                except Exception as e:
+                    logger.warning(f"Template matching failed: {e}")
+                    template_result = {
+                        "success": False,
+                        "error": str(e),
+                        "percentage": None,
+                        "confidence": 0.0
+                    }
+
+            # Determine which result to use for logic (PRIMARY_STRATEGY)
+            primary_result = None
+            primary_percentage = None
+            primary_confidence = 0.0
+
+            if primary_strategy == "template" and enable_template:
+                if template_result and template_result.get("success"):
+                    primary_result = template_result
+                    primary_percentage = template_result["percentage"]
+                    primary_confidence = template_result["confidence"]
+                    logger.debug(f"Using template result as primary: {primary_percentage}%")
+                elif enable_gemini and gemini_result and gemini_result.get("success"):
+                    # Fallback to LLM if template failed
+                    primary_result = gemini_result
+                    primary_percentage = gemini_result["battery_percentage"]
+                    primary_confidence = gemini_result["confidence"]
+                    logger.debug(f"Template failed, falling back to LLM: {primary_percentage}%")
+            else:  # primary_strategy == "llm" or default
+                if enable_gemini and gemini_result and gemini_result.get("success"):
+                    primary_result = gemini_result
+                    primary_percentage = gemini_result["battery_percentage"]
+                    primary_confidence = gemini_result["confidence"]
+                    logger.debug(f"Using LLM result as primary: {primary_percentage}%")
+                elif enable_template and template_result and template_result.get("success"):
+                    # Fallback to template if LLM failed
+                    primary_result = template_result
+                    primary_percentage = template_result["percentage"]
+                    primary_confidence = template_result["confidence"]
+                    logger.debug(f"LLM failed, falling back to template: {primary_percentage}%")
+
+            # COLLECTION MODE: Save image with LLM's label if LLM succeeded (always active)
+            if enable_gemini and gemini_result and gemini_result.get("success"):
+                try:
+                    if processed_image is None:
+                        processed_image = capture_and_process_image_for_gemini()
+                    llm_percentage = gemini_result["battery_percentage"]
+                    save_success = template_classifier.save_labeled_image(processed_image, llm_percentage)
                     if save_success:
-                        logger.debug(f"Collected training image for {battery_percentage}%")
+                        logger.debug(f"Collected training image for {llm_percentage}%")
                 except Exception as e:
                     logger.warning(f"Failed to collect training image: {e}")
 
-                # COMPARISON MODE: Log template matching prediction if coverage >= 50%
-                if template_classifier.should_enable_comparison_mode():
-                    try:
-                        template_result = template_classifier.classify_image(processed_image)
-                        log_comparison(battery_percentage, template_result)
-                    except Exception as e:
-                        logger.warning(f"Template comparison failed: {e}")
+            # COMPARISON MODE: Log and save comparison if both strategies ran
+            if enable_gemini and enable_template:
+                # Log to stdout (existing behavior)
+                if gemini_result and gemini_result.get("success"):
+                    log_comparison(gemini_result["battery_percentage"], template_result)
 
-                if confidence >= confidence_threshold:
+                # Save to comparison storage
+                try:
+                    if processed_image is None:
+                        processed_image = capture_and_process_image_for_gemini()
+
+                    gemini_pct = gemini_result["battery_percentage"] if gemini_result and gemini_result.get("success") else None
+                    template_pct = template_result["percentage"] if template_result and template_result.get("success") else None
+                    template_conf = template_result.get("confidence") if template_result else None
+
+                    await comparison_storage.save_comparison(
+                        image_data=processed_image,
+                        gemini_percentage=gemini_pct,
+                        groq_percentage=None,  # Will be set if groq was used
+                        template_percentage=template_pct,
+                        template_confidence=template_conf,
+                        llm_source=llm_source
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to save comparison record: {e}")
+
+            processing_time = time.time() - start_time
+
+            # Process primary result if we have one
+            if primary_result and primary_percentage is not None:
+
+                if primary_confidence >= confidence_threshold:
                     # Check plausibility against last reading
                     should_store = True
                     plausibility_msg = ""
 
                     # Special handling for 100% readings to filter false positives
                     # Require 3 consecutive 100% readings before believing it
-                    if battery_percentage == 100:
+                    if primary_percentage == 100:
                         consecutive_100_readings += 1
                         if consecutive_100_readings < 3:
                             should_store = False
@@ -1109,43 +1222,48 @@ async def background_worker():
                         if consecutive_100_readings > 0:
                             logger.debug(f"Reset consecutive 100% counter (was {consecutive_100_readings})")
                         consecutive_100_readings = 0
-                    
+
                     try:
                         last_readings = await db.get_recent_readings(limit=1)
                         if last_readings:
                             last_reading = last_readings[0]
                             time_diff_minutes = (datetime.now().timestamp() - last_reading["timestamp"]) / 60
-                            percentage_diff = abs(battery_percentage - last_reading["battery_percentage"])
-                            
+                            percentage_diff = abs(primary_percentage - last_reading["battery_percentage"])
+
                             # Plausibility checks
                             if time_diff_minutes < 2 and percentage_diff > 8:
-                                if confidence < 0.9:
+                                if primary_confidence < 0.9:
                                     should_store = False
-                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {battery_percentage}% in {time_diff_minutes:.1f}min (conf: {confidence})"
+                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {primary_percentage}% in {time_diff_minutes:.1f}min (conf: {primary_confidence})"
                             elif time_diff_minutes < 5 and percentage_diff > 15:
-                                if confidence < 0.85:
-                                    should_store = False  
-                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {battery_percentage}% in {time_diff_minutes:.1f}min (conf: {confidence})"
+                                if primary_confidence < 0.85:
+                                    should_store = False
+                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {primary_percentage}% in {time_diff_minutes:.1f}min (conf: {primary_confidence})"
                     except:
                         pass
-                    
+
                     if should_store:
+                        # Determine OCR method for logging
+                        ocr_method = f"worker_{primary_strategy}"
+                        total_attempts = primary_result.get("total_attempts", 1)
+                        raw_vote_data = primary_result.get("raw_response")
+
                         # Store in database and get the filtered percentage
                         filtered_percentage = await db.insert_reading(
-                            battery_percentage=battery_percentage,
-                            confidence=confidence,
-                            ocr_method="worker_gemini",
-                            total_attempts=ocr_result["total_attempts"],
-                            raw_vote_data=ocr_result.get("raw_response")
+                            battery_percentage=primary_percentage,
+                            confidence=primary_confidence,
+                            ocr_method=ocr_method,
+                            total_attempts=total_attempts,
+                            raw_vote_data=raw_vote_data
                         )
                         # Compact logging - combine reading and voting details
                         vote_info = ""
-                        if "vote_distribution" in ocr_result and len(ocr_result['vote_distribution']) > 1:
-                            vote_info = f" [{ocr_result['vote_distribution']}]"
-                        logger.info(f"📊 {battery_percentage}% (conf: {confidence:.2f}){vote_info}")
+                        if "vote_distribution" in primary_result and len(primary_result.get('vote_distribution', {})) > 1:
+                            vote_info = f" [{primary_result['vote_distribution']}]"
+                        logger.info(f"📊 {primary_percentage}% (conf: {primary_confidence:.2f}, {primary_strategy}){vote_info}")
 
                         # If we got 100% confidence, start cooldown period
-                        if confidence >= 1.0:
+                        if primary_confidence >= 1.0:
                             last_perfect_reading_time = time.time()
                             logger.info(f"⏸️  Perfect confidence achieved - entering {cooldown_seconds}s cooldown period")
 
@@ -1167,10 +1285,15 @@ async def background_worker():
                     else:
                         logger.debug(f"Plausibility check failed: {plausibility_msg}")
                 else:
-                    logger.warning(f"❌ Low confidence reading skipped: {battery_percentage}% (confidence: {confidence}) - {ocr_result.get('message', 'no details')}")
+                    logger.warning(f"❌ Low confidence reading skipped: {primary_percentage}% (confidence: {primary_confidence})")
             else:
-                logger.info(f"❌ OCR failed: {ocr_result.get('message', 'No valid OCR results')}")
-                # This could be causing health check failures!
+                # No valid result from any strategy
+                error_messages = []
+                if enable_gemini and gemini_result:
+                    error_messages.append(f"LLM: {gemini_result.get('message', 'failed')}")
+                if enable_template and template_result:
+                    error_messages.append(f"Template: {template_result.get('error', 'failed')}")
+                logger.info(f"❌ OCR failed: {', '.join(error_messages) if error_messages else 'No valid results'}")
                 
         except Exception as e:
             logger.error(f"Background worker error: {e}")

@@ -21,6 +21,7 @@ from recommendations import analyze_recent_readings_for_recommendations
 from switchbot_controller import switchbot_controller
 from device_discovery import device_discovery
 from template_classifier import template_classifier, get_training_status
+from comparison_storage import comparison_storage
 
 load_dotenv()
 
@@ -258,6 +259,11 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await db.init_db()
     logger.info("Database initialized")
+
+    # Initialize comparison storage
+    await comparison_storage.init_db()
+    logger.info("Comparison storage initialized")
+
     logger.info("Background polling is handled by separate worker service")
 
     yield
@@ -1968,6 +1974,95 @@ async def verify_all_images(categories: str = Form(...)):
         return {"success": False, "error": str(e)}
 
 
+@app.get("/comparisons/stats")
+async def get_comparison_stats():
+    """Get aggregated comparison statistics"""
+    try:
+        stats = await comparison_storage.get_statistics()
+        return {"success": True, **stats}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to get comparison stats: {str(e)}"}
+
+
+@app.get("/comparisons/records")
+async def get_comparison_records(
+    limit: int = 50,
+    offset: int = 0,
+    filter: str = "all",
+    value: int = None
+):
+    """
+    Get comparison records with pagination and filtering
+
+    Args:
+        limit: Maximum number of records to return (default: 50)
+        offset: Number of records to skip (default: 0)
+        filter: "all" or "disagreements" (default: "all")
+        value: Optional filter for specific battery percentage value
+    """
+    try:
+        records = await comparison_storage.get_records(
+            limit=limit,
+            offset=offset,
+            filter_type=filter,
+            value=value
+        )
+        return {"success": True, "records": records, "count": len(records)}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to get comparison records: {str(e)}"}
+
+
+@app.get("/comparisons/image/{filename}")
+async def get_comparison_image(filename: str):
+    """
+    Serve a specific comparison image
+
+    Args:
+        filename: The image filename
+    """
+    try:
+        image_path = comparison_storage.comparison_images_dir / filename
+
+        if not image_path.exists():
+            return {"success": False, "error": "Image not found"}
+
+        # Security check: ensure path is within comparison_images
+        if not str(image_path.resolve()).startswith(str(comparison_storage.comparison_images_dir.resolve())):
+            return {"success": False, "error": "Invalid path"}
+
+        return FileResponse(image_path, media_type="image/jpeg")
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/comparisons/verify/{record_id}")
+async def verify_comparison_record(record_id: int, human_percentage: int = Form(...)):
+    """
+    Update comparison record with human-verified ground truth
+
+    Args:
+        record_id: Record ID to update
+        human_percentage: Human-verified battery percentage (0-100)
+    """
+    try:
+        # Validate percentage
+        if not (0 <= human_percentage <= 100):
+            return {"success": False, "error": "Invalid percentage value (must be 0-100)"}
+
+        success = await comparison_storage.update_human_verification(record_id, human_percentage)
+
+        if success:
+            return {
+                "success": True,
+                "message": f"Updated record {record_id} with human verification: {human_percentage}%"
+            }
+        else:
+            return {"success": False, "error": "Failed to update record"}
+
+    except Exception as e:
+        return {"success": False, "error": f"Failed to verify record: {str(e)}"}
+
+
 @app.get("/training/review", response_class=HTMLResponse)
 async def training_review_ui():
     """
@@ -1987,6 +2082,18 @@ async def training_review_ui():
             background: #1a1a2e; color: #eee; padding: 20px;
         }
         h1 { margin-bottom: 10px; color: #00d4ff; }
+        .tabs {
+            display: flex; gap: 10px; margin-bottom: 20px;
+            border-bottom: 2px solid #16213e;
+        }
+        .tab {
+            padding: 12px 24px; cursor: pointer; background: #16213e;
+            border-radius: 8px 8px 0 0; transition: all 0.2s;
+        }
+        .tab:hover { background: #0f3460; }
+        .tab.active { background: #00d4ff; color: #1a1a2e; font-weight: bold; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
         .stats {
             background: #16213e; padding: 15px; border-radius: 8px;
             margin-bottom: 20px; display: flex; gap: 30px; flex-wrap: wrap;
@@ -2067,11 +2174,54 @@ async def training_review_ui():
         .empty-state { text-align: center; padding: 50px; color: #666; }
         .percentage-selector { margin-bottom: 15px; }
         .percentage-selector label { margin-right: 10px; }
+        /* Comparison Stats specific styles */
+        .value-table {
+            width: 100%; border-collapse: collapse; background: #16213e;
+            border-radius: 8px; overflow: hidden; margin-bottom: 20px;
+        }
+        .value-table th, .value-table td {
+            padding: 12px; text-align: left; border-bottom: 1px solid #0f3460;
+        }
+        .value-table th { background: #0f3460; color: #00d4ff; font-weight: bold; }
+        .value-table tr:hover { background: #0f3460; cursor: pointer; }
+        .value-table tr.low-agreement { background: #3d1a1a; }
+        .value-table tr.medium-agreement { background: #3d2a1a; }
+        .comparison-record {
+            background: #16213e; padding: 15px; border-radius: 8px;
+            margin-bottom: 10px; display: flex; gap: 15px; align-items: center;
+        }
+        .comparison-record img { width: 150px; height: auto; border-radius: 4px; cursor: pointer; }
+        .comparison-record .details { flex: 1; }
+        .comparison-record .details div { margin-bottom: 5px; }
+        .comparison-record .agreement-badge {
+            padding: 5px 10px; border-radius: 4px; font-weight: bold;
+        }
+        .comparison-record .agreement-badge.agree { background: #28a745; }
+        .comparison-record .agreement-badge.disagree { background: #e94560; }
+        .summary-cards {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px; margin-bottom: 20px;
+        }
+        .summary-card {
+            background: #16213e; padding: 20px; border-radius: 8px; text-align: center;
+        }
+        .summary-card .value { font-size: 2.5em; font-weight: bold; color: #00d4ff; }
+        .summary-card .label { color: #888; margin-top: 5px; }
+        .summary-card.green .value { color: #28a745; }
+        .summary-card.yellow .value { color: #ffc107; }
+        .summary-card.red .value { color: #e94560; }
     </style>
 </head>
 <body>
-    <h1>Training Image Review</h1>
+    <h1>Training & Comparison Review</h1>
 
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('training')">Training Images</div>
+        <div class="tab" onclick="switchTab('comparisons')">Comparison Stats</div>
+    </div>
+
+    <!-- Training Images Tab -->
+    <div id="training-tab" class="tab-content active">
     <div class="stats" id="stats">
         <div class="stat">
             <div class="stat-value" id="coverage">-</div>
@@ -2106,6 +2256,59 @@ async def training_review_ui():
     </div>
 
     <div class="grid" id="image-grid"></div>
+    </div>
+
+    <!-- Comparison Stats Tab -->
+    <div id="comparisons-tab" class="tab-content">
+        <div class="summary-cards">
+            <div class="summary-card" id="total-comparisons-card">
+                <div class="value" id="total-comparisons">-</div>
+                <div class="label">Total Comparisons</div>
+            </div>
+            <div class="summary-card" id="agreement-rate-card">
+                <div class="value" id="agreement-rate">-</div>
+                <div class="label">Agreement Rate</div>
+            </div>
+            <div class="summary-card">
+                <div class="value" id="recent-disagreements">-</div>
+                <div class="label">Recent Disagreements (24h)</div>
+            </div>
+            <div class="summary-card">
+                <div class="value" id="primary-strategy">-</div>
+                <div class="label">Primary Strategy</div>
+            </div>
+        </div>
+
+        <h2 style="margin-bottom: 15px; color: #00d4ff;">Per-Value Agreement</h2>
+        <table class="value-table">
+            <thead>
+                <tr>
+                    <th>Value</th>
+                    <th>Count</th>
+                    <th>Agreements</th>
+                    <th>Disagreements</th>
+                    <th>Agreement Rate</th>
+                </tr>
+            </thead>
+            <tbody id="value-table-body">
+                <tr><td colspan="5" style="text-align: center; color: #666;">Loading...</td></tr>
+            </tbody>
+        </table>
+
+        <h2 style="margin-bottom: 15px; color: #00d4ff;">Comparison Records</h2>
+        <div class="controls" style="margin-bottom: 15px;">
+            <select id="comparison-filter">
+                <option value="all">All Records</option>
+                <option value="disagreements">Disagreements Only</option>
+            </select>
+            <select id="comparison-value-filter">
+                <option value="">All Values</option>
+            </select>
+            <button onclick="loadComparisonRecords()">Refresh</button>
+        </div>
+
+        <div id="comparison-records-list"></div>
+    </div>
 
     <div class="modal" id="modal">
         <span class="close-btn" onclick="closeModal()">&times;</span>
@@ -2377,6 +2580,163 @@ async def training_review_ui():
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') closeModal();
         });
+
+        // Tab switching
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+
+            // Show selected tab
+            if (tabName === 'training') {
+                document.getElementById('training-tab').classList.add('active');
+                event.target.classList.add('active');
+            } else if (tabName === 'comparisons') {
+                document.getElementById('comparisons-tab').classList.add('active');
+                event.target.classList.add('active');
+                loadComparisonStats();
+                loadComparisonRecords();
+            }
+        }
+
+        // Load comparison statistics
+        async function loadComparisonStats() {
+            try {
+                const res = await fetch('/comparisons/stats');
+                const data = await res.json();
+
+                if (data.success) {
+                    // Update summary cards
+                    document.getElementById('total-comparisons').textContent = data.total_comparisons;
+                    document.getElementById('agreement-rate').textContent = (data.agreement_rate * 100).toFixed(1) + '%';
+                    document.getElementById('recent-disagreements').textContent = data.recent_disagreements;
+
+                    // Color-code agreement rate
+                    const rateCard = document.getElementById('agreement-rate-card');
+                    const rate = data.agreement_rate;
+                    rateCard.className = 'summary-card';
+                    if (rate >= 0.9) {
+                        rateCard.classList.add('green');
+                    } else if (rate >= 0.7) {
+                        rateCard.classList.add('yellow');
+                    } else {
+                        rateCard.classList.add('red');
+                    }
+
+                    // Update per-value table
+                    const tableBody = document.getElementById('value-table-body');
+                    if (Object.keys(data.by_value).length === 0) {
+                        tableBody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #666;">No comparison data yet</td></tr>';
+                    } else {
+                        let html = '';
+                        const sortedValues = Object.keys(data.by_value).sort((a, b) => parseInt(a) - parseInt(b));
+
+                        for (const value of sortedValues) {
+                            const stats = data.by_value[value];
+                            const disagreements = stats.count - stats.agreements;
+                            let rowClass = '';
+                            if (stats.agreement_rate < 0.7) {
+                                rowClass = 'low-agreement';
+                            } else if (stats.agreement_rate < 0.9) {
+                                rowClass = 'medium-agreement';
+                            }
+
+                            html += `
+                                <tr class="${rowClass}" onclick="filterByValue(${value})">
+                                    <td>${value}%</td>
+                                    <td>${stats.count}</td>
+                                    <td>${stats.agreements}</td>
+                                    <td>${disagreements}</td>
+                                    <td>${(stats.agreement_rate * 100).toFixed(1)}%</td>
+                                </tr>
+                            `;
+                        }
+                        tableBody.innerHTML = html;
+
+                        // Populate value filter dropdown
+                        const valueFilter = document.getElementById('comparison-value-filter');
+                        valueFilter.innerHTML = '<option value="">All Values</option>';
+                        for (const value of sortedValues) {
+                            valueFilter.innerHTML += `<option value="${value}">${value}%</option>`;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load comparison stats:', e);
+            }
+        }
+
+        // Filter records by value
+        function filterByValue(value) {
+            document.getElementById('comparison-value-filter').value = value;
+            loadComparisonRecords();
+        }
+
+        // Load comparison records
+        async function loadComparisonRecords() {
+            try {
+                const filterType = document.getElementById('comparison-filter').value;
+                const value = document.getElementById('comparison-value-filter').value;
+
+                let url = `/comparisons/records?limit=50&filter=${filterType}`;
+                if (value) {
+                    url += `&value=${value}`;
+                }
+
+                const res = await fetch(url);
+                const data = await res.json();
+
+                if (data.success) {
+                    const list = document.getElementById('comparison-records-list');
+
+                    if (data.records.length === 0) {
+                        list.innerHTML = '<div class="empty-state">No comparison records found</div>';
+                    } else {
+                        let html = '';
+                        for (const record of data.records) {
+                            const llmPct = record.gemini_percentage !== null ? record.gemini_percentage : record.groq_percentage;
+                            const llmLabel = record.llm_source === 'groq' ? 'Groq' : 'Gemini';
+                            const agreementClass = record.agreement ? 'agree' : 'disagree';
+                            const agreementText = record.agreement ? '✓ Agree' : '✗ Disagree';
+
+                            const humanVerified = record.human_verified_percentage !== null
+                                ? `<div><strong>Human:</strong> ${record.human_verified_percentage}%</div>`
+                                : '<div><em>Not verified</em></div>';
+
+                            html += `
+                                <div class="comparison-record">
+                                    <img src="/comparisons/image/${record.image_filename}"
+                                         onclick="openComparisonModal(${record.id}, '${record.image_filename}')"
+                                         alt="Comparison image">
+                                    <div class="details">
+                                        <div><strong>${llmLabel}:</strong> ${llmPct !== null ? llmPct + '%' : 'Failed'}</div>
+                                        <div><strong>Template:</strong> ${record.template_percentage !== null ? record.template_percentage + '% (conf: ' + record.template_confidence.toFixed(3) + ')' : 'Failed'}</div>
+                                        ${humanVerified}
+                                        <div style="font-size: 0.85em; color: #888;">${new Date(record.timestamp * 1000).toLocaleString()}</div>
+                                    </div>
+                                    <div class="agreement-badge ${agreementClass}">${agreementText}</div>
+                                </div>
+                            `;
+                        }
+                        list.innerHTML = html;
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load comparison records:', e);
+            }
+        }
+
+        // Open comparison modal (reuse existing modal)
+        function openComparisonModal(recordId, filename) {
+            document.getElementById('modal-image').src = `/comparisons/image/${filename}`;
+            document.getElementById('modal-info').textContent = `Comparison Record #${recordId}`;
+            document.getElementById('percentage-grid').innerHTML = '<p>Human verification for comparisons coming soon</p>';
+            document.getElementById('modal').classList.add('active');
+        }
+
+        // Update comparison filter listener
+        document.getElementById('comparison-filter').addEventListener('change', loadComparisonRecords);
+        document.getElementById('comparison-value-filter').addEventListener('change', loadComparisonRecords);
 
         // Initial load
         loadStats();
