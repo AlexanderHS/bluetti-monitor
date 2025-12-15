@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 class TemplateClassifier:
     """Template-based battery percentage classifier with automatic training"""
 
+    # Black screen detection thresholds
+    BLACK_SCREEN_BRIGHTNESS_THRESHOLD = 50  # Mean brightness below this = black
+    BLACK_SCREEN_VARIANCE_THRESHOLD = 20    # Std dev below this = uniform (no content)
+
     def __init__(self, training_data_dir: str = "./training_data"):
         """
         Initialize template classifier
@@ -65,6 +69,46 @@ class TemplateClassifier:
         invalid_dir.mkdir(exist_ok=True)
 
         logger.debug(f"Initialized {self.training_data_dir} with 0-100 subdirectories + invalid")
+
+    def _is_black_screen(self, img: np.ndarray) -> bool:
+        """
+        Detect if an image is a black/dark screen (display off or failed capture)
+
+        Args:
+            img: Grayscale image as numpy array
+
+        Returns:
+            True if image appears to be a black screen
+        """
+        mean_brightness = np.mean(img)
+        std_dev = np.std(img)
+
+        is_black = (mean_brightness < self.BLACK_SCREEN_BRIGHTNESS_THRESHOLD and
+                    std_dev < self.BLACK_SCREEN_VARIANCE_THRESHOLD)
+
+        if is_black:
+            logger.debug(f"Black screen detected: brightness={mean_brightness:.1f}, variance={std_dev:.1f}")
+
+        return is_black
+
+    def _preprocess_image(self, img: np.ndarray) -> np.ndarray:
+        """
+        Preprocess image for improved template matching
+
+        Applies histogram equalization to normalize brightness and increase contrast.
+        This helps with the low-contrast white-on-light-blue LCD display.
+
+        Args:
+            img: Grayscale image as numpy array
+
+        Returns:
+            Preprocessed image
+        """
+        # Apply histogram equalization to normalize brightness/contrast
+        # This spreads the narrow brightness range across full 0-255 spectrum
+        equalized = cv2.equalizeHist(img)
+
+        return equalized
 
     def is_verified(self, filename: str) -> bool:
         """
@@ -112,7 +156,7 @@ class TemplateClassifier:
             return False
 
     def _load_templates(self):
-        """Load all existing training images into memory as templates"""
+        """Load all existing training images into memory as templates (with preprocessing)"""
         self.templates.clear()
 
         # Load percentage templates (0-100)
@@ -129,6 +173,8 @@ class TemplateClassifier:
                     try:
                         img = cv2.imread(str(img_file), cv2.IMREAD_GRAYSCALE)
                         if img is not None:
+                            # Apply preprocessing (histogram equalization) to templates
+                            img = self._preprocess_image(img)
                             templates.append(img)
                     except Exception as e:
                         logger.warning(f"Failed to load template {img_file}: {e}")
@@ -146,6 +192,8 @@ class TemplateClassifier:
                     try:
                         img = cv2.imread(str(img_file), cv2.IMREAD_GRAYSCALE)
                         if img is not None:
+                            # Apply preprocessing to invalid templates too
+                            img = self._preprocess_image(img)
                             templates.append(img)
                     except Exception as e:
                         logger.warning(f"Failed to load invalid template {img_file}: {e}")
@@ -153,7 +201,7 @@ class TemplateClassifier:
                 if templates:
                     self.templates["invalid"] = templates
 
-        logger.debug(f"Loaded templates for {len(self.templates)} categories (including invalid if present)")
+        logger.debug(f"Loaded templates for {len(self.templates)} categories (with histogram equalization)")
 
     def get_coverage_stats(self) -> Dict:
         """
@@ -294,7 +342,8 @@ class TemplateClassifier:
             image_data: Raw image bytes (JPEG)
 
         Returns:
-            Dictionary with classification results, or None if image matches "invalid" template
+            Dictionary with classification results, or None if image is invalid
+            (black screen or matches "invalid" template)
             None indicates the calling code should skip this cycle silently
         """
         if not self.templates:
@@ -317,6 +366,15 @@ class TemplateClassifier:
                     "percentage": None,
                     "confidence": 0.0
                 }
+
+            # Check for black screen BEFORE preprocessing
+            # (preprocessing would distort the brightness/variance check)
+            if self._is_black_screen(test_image):
+                logger.info("Black screen detected, skipping cycle")
+                return None  # Signal to skip this cycle
+
+            # Apply preprocessing (histogram equalization) to match template preprocessing
+            test_image = self._preprocess_image(test_image)
 
             # Compare against all templates
             best_category = None
