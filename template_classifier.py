@@ -44,6 +44,9 @@ class TemplateClassifier:
         self.comparison_threshold = float(os.getenv("COMPARISON_MODE_THRESHOLD", "0.25"))
         self.collection_enabled = True  # Collection always active by default
 
+        # Preprocessing configuration: "histogram_eq" (default) or "none"
+        self.preprocessing_mode = os.getenv("TEMPLATE_PREPROCESSING", "histogram_eq").lower()
+
         # Template cache: {percentage: [template_images]}
         self.templates = {}
 
@@ -97,13 +100,17 @@ class TemplateClassifier:
 
         Applies histogram equalization to normalize brightness and increase contrast.
         This helps with the low-contrast white-on-light-blue LCD display.
+        Can be disabled via TEMPLATE_PREPROCESSING=none env var.
 
         Args:
             img: Grayscale image as numpy array
 
         Returns:
-            Preprocessed image
+            Preprocessed image (or original if preprocessing disabled)
         """
+        if self.preprocessing_mode == "none":
+            return img
+
         # Apply histogram equalization to normalize brightness/contrast
         # This spreads the narrow brightness range across full 0-255 spectrum
         equalized = cv2.equalizeHist(img)
@@ -442,6 +449,30 @@ class TemplateClassifier:
             True if saved successfully
         """
         return self.save_labeled_image(image_data, category)
+
+    def get_preprocessed_image(self, image_data: bytes) -> Optional[bytes]:
+        """
+        Apply preprocessing to an image and return as JPEG bytes.
+        Used by UI to show "classifier view" of images.
+
+        Args:
+            image_data: Raw image bytes (JPEG)
+
+        Returns:
+            Preprocessed image as JPEG bytes, or None on error
+        """
+        try:
+            nparr = np.frombuffer(image_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                return None
+
+            preprocessed = self._preprocess_image(img)
+            _, encoded = cv2.imencode('.jpg', preprocessed, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            return encoded.tobytes()
+        except Exception as e:
+            logger.error(f"Failed to preprocess image: {e}")
+            return None
 
 
 def extract_timestamp_from_filename(filename: str) -> Optional[float]:

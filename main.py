@@ -1684,16 +1684,17 @@ async def list_training_images(category: str = None, filter: str = "all"):
 
 
 @app.get("/training/image/{category}/{filename}")
-async def get_training_image(category: str, filename: str):
+async def get_training_image(category: str, filename: str, preprocess: bool = False):
     """
     Serve a specific training image.
 
     Args:
         category: The category folder (0-100 or "invalid")
         filename: The image filename
+        preprocess: If true, apply classifier preprocessing (histogram equalization)
 
     Returns:
-        The image file
+        The image file (raw or preprocessed)
     """
     try:
         # Validate category
@@ -1714,6 +1715,17 @@ async def get_training_image(category: str, filename: str):
         # Security check: ensure path is within training_data
         if not str(image_path.resolve()).startswith(str(training_dir.resolve())):
             return {"success": False, "error": "Invalid path"}
+
+        if preprocess:
+            # Return preprocessed version (as classifier sees it)
+            with open(image_path, 'rb') as f:
+                raw_data = f.read()
+            preprocessed = template_classifier.get_preprocessed_image(raw_data)
+            if preprocessed:
+                from fastapi.responses import Response
+                return Response(content=preprocessed, media_type="image/jpeg")
+            # Fall back to raw if preprocessing fails
+            return FileResponse(image_path, media_type="image/jpeg")
 
         return FileResponse(image_path, media_type="image/jpeg")
     except Exception as e:
@@ -2282,6 +2294,10 @@ async def training_review_ui():
         </select>
         <button onclick="loadImages()">Refresh</button>
         <button onclick="verifyAllVisible()" style="background: #28a745;">Verify All Visible</button>
+        <label style="margin-left: 20px; display: flex; align-items: center; gap: 5px; cursor: pointer;">
+            <input type="checkbox" id="preprocess-toggle" onchange="loadImages()" style="width: 18px; height: 18px; cursor: pointer;">
+            <span title="Show images with histogram equalization (as classifier sees them)">Classifier View</span>
+        </label>
     </div>
 
     <div class="grid" id="image-grid"></div>
@@ -2425,6 +2441,11 @@ async def training_review_ui():
             select.value = currentValue;
         }
 
+        function getImageUrl(category, filename) {
+            const preprocess = document.getElementById('preprocess-toggle').checked;
+            return `/training/image/${category}/${filename}${preprocess ? '?preprocess=true' : ''}`;
+        }
+
         function renderImages() {
             const grid = document.getElementById('image-grid');
             const filter = document.getElementById('percentage-filter').value;
@@ -2456,7 +2477,7 @@ async def training_review_ui():
                     html += `
                         <div class="image-card" onclick="openModal('${cat}', '${filename}')">
                             ${verifiedBadge}
-                            <img src="/training/image/${cat}/${filename}" alt="${displayLabel}" loading="lazy">
+                            <img src="${getImageUrl(cat, filename)}" alt="${displayLabel}" loading="lazy">
                             <div class="info">
                                 <strong>${displayLabel}</strong>
                                 <div class="filename">${filename}</div>
@@ -2472,7 +2493,7 @@ async def training_review_ui():
 
         function openModal(category, filename) {
             currentImage = { category, filename };
-            document.getElementById('modal-image').src = `/training/image/${category}/${filename}`;
+            document.getElementById('modal-image').src = getImageUrl(category, filename);
             document.getElementById('modal-info').textContent = `Current: ${category} | ${filename}`;
 
             // Build percentage grid with "invalid" option
