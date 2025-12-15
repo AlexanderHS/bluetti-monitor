@@ -46,6 +46,7 @@ class ComparisonStorage:
                     template_percentage INTEGER,
                     template_confidence REAL,
                     human_verified_percentage INTEGER,
+                    human_verified_invalid BOOLEAN DEFAULT 0,
                     image_filename TEXT NOT NULL,
                     agreement BOOLEAN NOT NULL,
                     llm_source TEXT,
@@ -60,6 +61,21 @@ class ComparisonStorage:
                 CREATE INDEX IF NOT EXISTS idx_comparison_agreement
                 ON comparison_records(agreement)
             """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_comparison_human_verified
+                ON comparison_records(human_verified_percentage)
+            """)
+
+            # Migration: Add human_verified_invalid column if it doesn't exist
+            try:
+                await db.execute("SELECT human_verified_invalid FROM comparison_records LIMIT 1")
+            except:
+                logger.info("Migrating: adding human_verified_invalid column")
+                await db.execute("""
+                    ALTER TABLE comparison_records
+                    ADD COLUMN human_verified_invalid BOOLEAN DEFAULT 0
+                """)
+
             await db.commit()
             logger.info("Comparison records table initialized")
 
@@ -196,6 +212,15 @@ class ComparisonStorage:
                     agreements = row[1] if row else 0
                     agreement_rate = agreements / total_comparisons if total_comparisons > 0 else 0.0
 
+                # Human verified count
+                async with db.execute("""
+                    SELECT COUNT(*)
+                    FROM comparison_records
+                    WHERE human_verified_percentage IS NOT NULL OR human_verified_invalid = 1
+                """) as cursor:
+                    row = await cursor.fetchone()
+                    human_verified_count = row[0] if row else 0
+
                 # By value statistics (using LLM result as reference)
                 by_value = {}
                 async with db.execute("""
@@ -244,9 +269,18 @@ class ComparisonStorage:
                     row = await cursor.fetchone()
                     recent_disagreements = row[0] if row else 0
 
+                # Calculate accuracy metrics
+                accuracy_metrics = await self.calculate_accuracy_metrics()
+
+                # Get error patterns
+                error_patterns = await self.get_error_patterns(limit=10)
+
                 return {
                     "total_comparisons": total_comparisons,
                     "agreement_rate": round(agreement_rate, 3),
+                    "human_verified_count": human_verified_count,
+                    "accuracy": accuracy_metrics,
+                    "error_patterns": error_patterns,
                     "by_value": by_value,
                     "by_llm_source": by_llm_source,
                     "recent_disagreements": recent_disagreements
@@ -257,6 +291,12 @@ class ComparisonStorage:
             return {
                 "total_comparisons": 0,
                 "agreement_rate": 0.0,
+                "human_verified_count": 0,
+                "accuracy": {
+                    "llm": {"total_verified": 0, "correct": 0, "accuracy_rate": 0.0, "errors_by_type": {}},
+                    "template": {"total_verified": 0, "correct": 0, "accuracy_rate": 0.0, "errors_by_type": {}}
+                },
+                "error_patterns": [],
                 "by_value": {},
                 "by_llm_source": {},
                 "recent_disagreements": 0,
@@ -289,8 +329,8 @@ class ComparisonStorage:
                     SELECT
                         id, timestamp, gemini_percentage, groq_percentage,
                         template_percentage, template_confidence,
-                        human_verified_percentage, image_filename,
-                        agreement, llm_source
+                        human_verified_percentage, human_verified_invalid,
+                        image_filename, agreement, llm_source
                     FROM comparison_records
                     WHERE 1=1
                 """
@@ -319,9 +359,10 @@ class ComparisonStorage:
                             "template_percentage": row[4],
                             "template_confidence": row[5],
                             "human_verified_percentage": row[6],
-                            "image_filename": row[7],
-                            "agreement": bool(row[8]),
-                            "llm_source": row[9]
+                            "human_verified_invalid": bool(row[7]),
+                            "image_filename": row[8],
+                            "agreement": bool(row[9]),
+                            "llm_source": row[10]
                         })
 
                     return records
@@ -330,37 +371,293 @@ class ComparisonStorage:
             logger.error(f"Failed to get records: {e}")
             return []
 
-    async def update_human_verification(self, record_id: int, human_percentage: int) -> bool:
+    async def update_human_verification(self, record_id: int, human_percentage: int = None, is_invalid: bool = False) -> bool:
         """
         Update a comparison record with human-verified ground truth
 
         Args:
             record_id: Record ID to update
-            human_percentage: Human-verified battery percentage (0-100)
+            human_percentage: Human-verified battery percentage (0-100), or None if invalid
+            is_invalid: True if the image is invalid/unreadable
 
         Returns:
             True if updated successfully, False otherwise
         """
         try:
-            # Validate percentage
-            if not (0 <= human_percentage <= 100):
-                logger.warning(f"Invalid human percentage: {human_percentage}")
-                return False
+            # Validate inputs
+            if is_invalid:
+                if human_percentage is not None:
+                    logger.warning("human_percentage should be None when is_invalid is True")
+                    return False
+            else:
+                if human_percentage is None or not (0 <= human_percentage <= 100):
+                    logger.warning(f"Invalid human percentage: {human_percentage}")
+                    return False
 
             async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("""
-                    UPDATE comparison_records
-                    SET human_verified_percentage = ?
-                    WHERE id = ?
-                """, (human_percentage, record_id))
-                await db.commit()
+                if is_invalid:
+                    await db.execute("""
+                        UPDATE comparison_records
+                        SET human_verified_percentage = NULL,
+                            human_verified_invalid = 1
+                        WHERE id = ?
+                    """, (record_id,))
+                    logger.info(f"Updated record {record_id} with human verification: INVALID")
+                else:
+                    await db.execute("""
+                        UPDATE comparison_records
+                        SET human_verified_percentage = ?,
+                            human_verified_invalid = 0
+                        WHERE id = ?
+                    """, (human_percentage, record_id))
+                    logger.info(f"Updated record {record_id} with human verification: {human_percentage}%")
 
-                logger.info(f"Updated record {record_id} with human verification: {human_percentage}%")
+                await db.commit()
                 return True
 
         except Exception as e:
             logger.error(f"Failed to update human verification: {e}")
             return False
+
+    async def find_record_by_timestamp(self, timestamp: float, tolerance: float = 2.0) -> Optional[int]:
+        """
+        Find a comparison record by timestamp with tolerance
+
+        Args:
+            timestamp: Target timestamp to match
+            tolerance: Time tolerance in seconds (default: ±2 seconds)
+
+        Returns:
+            Record ID if found, None otherwise
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("""
+                    SELECT id, timestamp
+                    FROM comparison_records
+                    WHERE timestamp BETWEEN ? AND ?
+                    ORDER BY ABS(timestamp - ?) ASC
+                    LIMIT 1
+                """, (timestamp - tolerance, timestamp + tolerance, timestamp)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        record_id, found_timestamp = row
+                        logger.debug(f"Found comparison record {record_id} at timestamp {found_timestamp} (target: {timestamp})")
+                        return record_id
+                    return None
+
+        except Exception as e:
+            logger.error(f"Failed to find record by timestamp: {e}")
+            return None
+
+    async def update_verification_by_timestamp(self, timestamp: float, human_percentage: int = None, is_invalid: bool = False) -> bool:
+        """
+        Update a comparison record with human verification by timestamp
+
+        Args:
+            timestamp: Timestamp from training image filename
+            human_percentage: Human-verified battery percentage (0-100), or None if invalid
+            is_invalid: True if the image is invalid/unreadable
+
+        Returns:
+            True if updated successfully, False otherwise
+        """
+        record_id = await self.find_record_by_timestamp(timestamp)
+        if record_id is None:
+            logger.debug(f"No comparison record found for timestamp {timestamp}")
+            return False
+
+        return await self.update_human_verification(record_id, human_percentage, is_invalid)
+
+    async def calculate_accuracy_metrics(self) -> Dict:
+        """
+        Calculate accuracy metrics for LLM and Template methods based on human-verified records
+
+        Returns:
+            Dictionary with accuracy metrics for both methods
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Count total human-verified records
+                async with db.execute("""
+                    SELECT COUNT(*)
+                    FROM comparison_records
+                    WHERE human_verified_percentage IS NOT NULL OR human_verified_invalid = 1
+                """) as cursor:
+                    row = await cursor.fetchone()
+                    total_verified = row[0] if row else 0
+
+                if total_verified == 0:
+                    return {
+                        "llm": {"total_verified": 0, "correct": 0, "accuracy_rate": 0.0, "errors_by_type": {}},
+                        "template": {"total_verified": 0, "correct": 0, "accuracy_rate": 0.0, "errors_by_type": {}}
+                    }
+
+                # LLM accuracy
+                async with db.execute("""
+                    SELECT
+                        COALESCE(gemini_percentage, groq_percentage) as llm_pct,
+                        human_verified_percentage,
+                        human_verified_invalid,
+                        template_percentage
+                    FROM comparison_records
+                    WHERE human_verified_percentage IS NOT NULL OR human_verified_invalid = 1
+                """) as cursor:
+                    rows = await cursor.fetchall()
+
+                    llm_correct = 0
+                    llm_errors = defaultdict(int)
+                    template_correct = 0
+                    template_errors = defaultdict(int)
+
+                    for row in rows:
+                        llm_pct, human_pct, is_invalid, template_pct = row
+
+                        # Determine ground truth
+                        if is_invalid:
+                            ground_truth = "invalid"
+                        else:
+                            ground_truth = human_pct
+
+                        # Check LLM accuracy
+                        if llm_pct is not None:
+                            if ground_truth == "invalid":
+                                if llm_pct is None:  # LLM said invalid (represented as None)
+                                    llm_correct += 1
+                                else:
+                                    llm_errors["invalid_as_value"] += 1
+                            else:
+                                if llm_pct == ground_truth:
+                                    llm_correct += 1
+                                elif llm_pct is None:
+                                    llm_errors["value_as_invalid"] += 1
+                                elif abs(llm_pct - ground_truth) == 1:
+                                    llm_errors["off_by_one"] += 1
+                                else:
+                                    llm_errors["off_by_more"] += 1
+
+                        # Check Template accuracy
+                        if template_pct is not None or ground_truth == "invalid":
+                            if ground_truth == "invalid":
+                                if template_pct is None:  # Template said invalid (represented as None)
+                                    template_correct += 1
+                                else:
+                                    template_errors["invalid_as_value"] += 1
+                            else:
+                                if template_pct == ground_truth:
+                                    template_correct += 1
+                                elif template_pct is None:
+                                    template_errors["value_as_invalid"] += 1
+                                elif abs(template_pct - ground_truth) == 1:
+                                    template_errors["off_by_one"] += 1
+                                else:
+                                    template_errors["off_by_more"] += 1
+
+                    llm_accuracy = llm_correct / total_verified if total_verified > 0 else 0.0
+                    template_accuracy = template_correct / total_verified if total_verified > 0 else 0.0
+
+                    return {
+                        "llm": {
+                            "total_verified": total_verified,
+                            "correct": llm_correct,
+                            "accuracy_rate": round(llm_accuracy, 3),
+                            "errors_by_type": dict(llm_errors)
+                        },
+                        "template": {
+                            "total_verified": total_verified,
+                            "correct": template_correct,
+                            "accuracy_rate": round(template_accuracy, 3),
+                            "errors_by_type": dict(template_errors)
+                        }
+                    }
+
+        except Exception as e:
+            logger.error(f"Failed to calculate accuracy metrics: {e}")
+            return {
+                "llm": {"total_verified": 0, "correct": 0, "accuracy_rate": 0.0, "errors_by_type": {}},
+                "template": {"total_verified": 0, "correct": 0, "accuracy_rate": 0.0, "errors_by_type": {}},
+                "error": str(e)
+            }
+
+    async def get_error_patterns(self, limit: int = 10) -> List[Dict]:
+        """
+        Get most common error patterns for each method
+
+        Args:
+            limit: Maximum number of patterns to return per method
+
+        Returns:
+            List of error pattern dictionaries
+        """
+        try:
+            patterns = []
+
+            async with aiosqlite.connect(self.db_path) as db:
+                # LLM error patterns
+                async with db.execute("""
+                    SELECT
+                        'llm' as method,
+                        COALESCE(gemini_percentage, groq_percentage) as predicted,
+                        CASE
+                            WHEN human_verified_invalid = 1 THEN 'invalid'
+                            ELSE CAST(human_verified_percentage AS TEXT)
+                        END as actual,
+                        COUNT(*) as count
+                    FROM comparison_records
+                    WHERE (human_verified_percentage IS NOT NULL OR human_verified_invalid = 1)
+                        AND (
+                            (human_verified_invalid = 1 AND COALESCE(gemini_percentage, groq_percentage) IS NOT NULL)
+                            OR (human_verified_invalid = 0 AND COALESCE(gemini_percentage, groq_percentage) != human_verified_percentage)
+                        )
+                    GROUP BY predicted, actual
+                    ORDER BY count DESC
+                    LIMIT ?
+                """, (limit,)) as cursor:
+                    async for row in cursor:
+                        method, predicted, actual, count = row
+                        patterns.append({
+                            "method": method,
+                            "predicted": predicted if predicted is not None else "invalid",
+                            "actual": actual,
+                            "count": count
+                        })
+
+                # Template error patterns
+                async with db.execute("""
+                    SELECT
+                        'template' as method,
+                        template_percentage as predicted,
+                        CASE
+                            WHEN human_verified_invalid = 1 THEN 'invalid'
+                            ELSE CAST(human_verified_percentage AS TEXT)
+                        END as actual,
+                        COUNT(*) as count
+                    FROM comparison_records
+                    WHERE (human_verified_percentage IS NOT NULL OR human_verified_invalid = 1)
+                        AND (
+                            (human_verified_invalid = 1 AND template_percentage IS NOT NULL)
+                            OR (human_verified_invalid = 0 AND template_percentage != human_verified_percentage)
+                        )
+                    GROUP BY predicted, actual
+                    ORDER BY count DESC
+                    LIMIT ?
+                """, (limit,)) as cursor:
+                    async for row in cursor:
+                        method, predicted, actual, count = row
+                        patterns.append({
+                            "method": method,
+                            "predicted": predicted if predicted is not None else "invalid",
+                            "actual": actual,
+                            "count": count
+                        })
+
+            # Sort all patterns by count
+            patterns.sort(key=lambda x: x["count"], reverse=True)
+            return patterns
+
+        except Exception as e:
+            logger.error(f"Failed to get error patterns: {e}")
+            return []
 
 
 # Global instance

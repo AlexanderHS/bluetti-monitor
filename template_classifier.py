@@ -386,6 +386,32 @@ class TemplateClassifier:
         return self.save_labeled_image(image_data, category)
 
 
+def extract_timestamp_from_filename(filename: str) -> Optional[float]:
+    """
+    Extract Unix timestamp from training image filename
+
+    Args:
+        filename: Training image filename (e.g., "20231201_123456_789012.jpg" or "20231201_123456_789012.verified.jpg")
+
+    Returns:
+        Unix timestamp as float, or None if unable to parse
+    """
+    try:
+        # Remove .verified. suffix if present
+        name = filename.replace(".verified.", ".")
+
+        # Remove extension
+        stem = name.rsplit(".", 1)[0]
+
+        # Parse timestamp: YYYYMMDD_HHMMSS_ffffff
+        dt = datetime.strptime(stem, "%Y%m%d_%H%M%S_%f")
+        return dt.timestamp()
+
+    except Exception as e:
+        logger.warning(f"Failed to extract timestamp from filename {filename}: {e}")
+        return None
+
+
 # Global instance
 template_classifier = TemplateClassifier()
 

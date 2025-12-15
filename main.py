@@ -20,7 +20,7 @@ from pathlib import Path
 from recommendations import analyze_recent_readings_for_recommendations
 from switchbot_controller import switchbot_controller
 from device_discovery import device_discovery
-from template_classifier import template_classifier, get_training_status
+from template_classifier import template_classifier, get_training_status, extract_timestamp_from_filename
 from comparison_storage import comparison_storage
 
 load_dotenv()
@@ -1806,6 +1806,25 @@ async def reclassify_training_image(
 
         logger.info(f"Reclassified {filename}: {from_category} -> {to_category}")
 
+        # Link ground truth to comparison record (if exists)
+        timestamp = extract_timestamp_from_filename(filename)
+        if timestamp is not None:
+            # Determine if target category is invalid
+            is_invalid = (to_category == "invalid")
+            human_percentage = None if is_invalid else int(to_category)
+
+            # Update comparison record by timestamp
+            updated = await comparison_storage.update_verification_by_timestamp(
+                timestamp=timestamp,
+                human_percentage=human_percentage,
+                is_invalid=is_invalid
+            )
+
+            if updated:
+                logger.info(f"Linked reclassification to comparison record: {to_category}")
+            else:
+                logger.debug(f"No matching comparison record found for timestamp {timestamp}")
+
         return {
             "success": True,
             "message": f"Moved {filename} from {from_category} to {to_category}",
@@ -2196,6 +2215,16 @@ async def training_review_ui():
         .comparison-record .agreement-badge {
             padding: 5px 10px; border-radius: 4px; font-weight: bold;
         }
+        .error-pattern-table {
+            width: 100%; border-collapse: collapse; background: #16213e;
+            border-radius: 8px; overflow: hidden;
+        }
+        .error-pattern-table th, .error-pattern-table td {
+            padding: 10px; text-align: left; border-bottom: 1px solid #0f3460;
+        }
+        .error-pattern-table th { background: #0f3460; color: #00d4ff; font-weight: bold; }
+        .error-pattern-table .llm-error { color: #ff6b6b; }
+        .error-pattern-table .template-error { color: #ffa500; }
         .comparison-record .agreement-badge.agree { background: #28a745; }
         .comparison-record .agreement-badge.disagree { background: #e94560; }
         .summary-cards {
@@ -2269,13 +2298,19 @@ async def training_review_ui():
                 <div class="value" id="agreement-rate">-</div>
                 <div class="label">Agreement Rate</div>
             </div>
+            <div class="summary-card" id="llm-accuracy-card">
+                <div class="value" id="llm-accuracy">-</div>
+                <div class="label">LLM Accuracy</div>
+                <div style="font-size: 0.75em; color: #888; margin-top: 5px;" id="llm-accuracy-count">-</div>
+            </div>
+            <div class="summary-card" id="template-accuracy-card">
+                <div class="value" id="template-accuracy">-</div>
+                <div class="label">Template Accuracy</div>
+                <div style="font-size: 0.75em; color: #888; margin-top: 5px;" id="template-accuracy-count">-</div>
+            </div>
             <div class="summary-card">
                 <div class="value" id="recent-disagreements">-</div>
                 <div class="label">Recent Disagreements (24h)</div>
-            </div>
-            <div class="summary-card">
-                <div class="value" id="primary-strategy">-</div>
-                <div class="label">Primary Strategy</div>
             </div>
         </div>
 
@@ -2294,6 +2329,11 @@ async def training_review_ui():
                 <tr><td colspan="5" style="text-align: center; color: #666;">Loading...</td></tr>
             </tbody>
         </table>
+
+        <h2 style="margin-bottom: 15px; color: #00d4ff;">Error Patterns</h2>
+        <div id="error-patterns-section" style="margin-bottom: 30px;">
+            <p style="color: #888; font-style: italic;">No error patterns available yet. Verify some training images to see which method makes which errors.</p>
+        </div>
 
         <h2 style="margin-bottom: 15px; color: #00d4ff;">Comparison Records</h2>
         <div class="controls" style="margin-bottom: 15px;">
@@ -2623,6 +2663,57 @@ async def training_review_ui():
                         rateCard.classList.add('red');
                     }
 
+                    // Update accuracy cards
+                    if (data.accuracy && data.accuracy.llm.total_verified > 0) {
+                        const llmAcc = data.accuracy.llm.accuracy_rate;
+                        const templateAcc = data.accuracy.template.accuracy_rate;
+                        const verifiedCount = data.accuracy.llm.total_verified;
+
+                        document.getElementById('llm-accuracy').textContent = (llmAcc * 100).toFixed(1) + '%';
+                        document.getElementById('llm-accuracy-count').textContent = `(based on ${verifiedCount} verified)`;
+                        document.getElementById('template-accuracy').textContent = (templateAcc * 100).toFixed(1) + '%';
+                        document.getElementById('template-accuracy-count').textContent = `(based on ${verifiedCount} verified)`;
+
+                        // Color-code accuracy cards
+                        const llmCard = document.getElementById('llm-accuracy-card');
+                        llmCard.className = 'summary-card';
+                        if (llmAcc >= 0.9) llmCard.classList.add('green');
+                        else if (llmAcc >= 0.7) llmCard.classList.add('yellow');
+                        else llmCard.classList.add('red');
+
+                        const templateCard = document.getElementById('template-accuracy-card');
+                        templateCard.className = 'summary-card';
+                        if (templateAcc >= 0.9) templateCard.classList.add('green');
+                        else if (templateAcc >= 0.7) templateCard.classList.add('yellow');
+                        else templateCard.classList.add('red');
+                    } else {
+                        document.getElementById('llm-accuracy').textContent = '-';
+                        document.getElementById('llm-accuracy-count').textContent = '(no verified data)';
+                        document.getElementById('template-accuracy').textContent = '-';
+                        document.getElementById('template-accuracy-count').textContent = '(no verified data)';
+                    }
+
+                    // Update error patterns section
+                    const errorPatternsSection = document.getElementById('error-patterns-section');
+                    if (data.error_patterns && data.error_patterns.length > 0) {
+                        let html = '<table class="error-pattern-table"><thead><tr><th>Method</th><th>Predicted</th><th>Actual</th><th>Count</th></tr></thead><tbody>';
+                        for (const pattern of data.error_patterns) {
+                            const methodClass = pattern.method === 'llm' ? 'llm-error' : 'template-error';
+                            html += `
+                                <tr>
+                                    <td class="${methodClass}">${pattern.method.toUpperCase()}</td>
+                                    <td>${pattern.predicted}${typeof pattern.predicted === 'number' ? '%' : ''}</td>
+                                    <td>${pattern.actual}${typeof pattern.actual === 'number' || !isNaN(pattern.actual) ? '%' : ''}</td>
+                                    <td>${pattern.count}</td>
+                                </tr>
+                            `;
+                        }
+                        html += '</tbody></table>';
+                        errorPatternsSection.innerHTML = html;
+                    } else {
+                        errorPatternsSection.innerHTML = '<p style="color: #888; font-style: italic;">No error patterns available yet. Verify some training images to see which method makes which errors.</p>';
+                    }
+
                     // Update per-value table
                     const tableBody = document.getElementById('value-table-body');
                     if (Object.keys(data.by_value).length === 0) {
@@ -2699,9 +2790,43 @@ async def training_review_ui():
                             const agreementClass = record.agreement ? 'agree' : 'disagree';
                             const agreementText = record.agreement ? '✓ Agree' : '✗ Disagree';
 
-                            const humanVerified = record.human_verified_percentage !== null
-                                ? `<div><strong>Human:</strong> ${record.human_verified_percentage}%</div>`
-                                : '<div><em>Not verified</em></div>';
+                            // Determine ground truth
+                            let groundTruth = null;
+                            let humanVerified = '<div><em>Not verified</em></div>';
+                            let llmVerdict = '';
+                            let templateVerdict = '';
+
+                            if (record.human_verified_invalid) {
+                                groundTruth = 'invalid';
+                                humanVerified = '<div><strong>Human:</strong> <span style="color: #ff6b6b;">Invalid</span></div>';
+
+                                // Check LLM accuracy
+                                if (llmPct !== null) {
+                                    llmVerdict = '<div style="color: #ff6b6b; font-size: 0.9em;">✗ LLM wrong</div>';
+                                }
+
+                                // Check Template accuracy
+                                if (record.template_percentage !== null) {
+                                    templateVerdict = '<div style="color: #ff6b6b; font-size: 0.9em;">✗ Template wrong</div>';
+                                }
+                            } else if (record.human_verified_percentage !== null) {
+                                groundTruth = record.human_verified_percentage;
+                                humanVerified = `<div><strong>Human:</strong> <span style="color: #28a745;">${groundTruth}%</span></div>`;
+
+                                // Check LLM accuracy
+                                if (llmPct === groundTruth) {
+                                    llmVerdict = '<div style="color: #28a745; font-size: 0.9em;">✓ LLM correct</div>';
+                                } else if (llmPct !== null) {
+                                    llmVerdict = '<div style="color: #ff6b6b; font-size: 0.9em;">✗ LLM wrong</div>';
+                                }
+
+                                // Check Template accuracy
+                                if (record.template_percentage === groundTruth) {
+                                    templateVerdict = '<div style="color: #28a745; font-size: 0.9em;">✓ Template correct</div>';
+                                } else if (record.template_percentage !== null) {
+                                    templateVerdict = '<div style="color: #ff6b6b; font-size: 0.9em;">✗ Template wrong</div>';
+                                }
+                            }
 
                             html += `
                                 <div class="comparison-record">
@@ -2709,8 +2834,8 @@ async def training_review_ui():
                                          onclick="openComparisonModal(${record.id}, '${record.image_filename}')"
                                          alt="Comparison image">
                                     <div class="details">
-                                        <div><strong>${llmLabel}:</strong> ${llmPct !== null ? llmPct + '%' : 'Failed'}</div>
-                                        <div><strong>Template:</strong> ${record.template_percentage !== null ? record.template_percentage + '% (conf: ' + record.template_confidence.toFixed(3) + ')' : 'Failed'}</div>
+                                        <div><strong>${llmLabel}:</strong> ${llmPct !== null ? llmPct + '%' : 'Failed'} ${llmVerdict}</div>
+                                        <div><strong>Template:</strong> ${record.template_percentage !== null ? record.template_percentage + '% (conf: ' + record.template_confidence.toFixed(3) + ')' : 'Failed'} ${templateVerdict}</div>
                                         ${humanVerified}
                                         <div style="font-size: 0.85em; color: #888;">${new Date(record.timestamp * 1000).toLocaleString()}</div>
                                     </div>
