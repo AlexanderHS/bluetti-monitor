@@ -256,7 +256,13 @@ class ComparisonStorage:
                     async for row in cursor:
                         source, count, agreements = row
                         # Ensure source is a string (SQLite might return bytes)
-                        source_str = source.decode('utf-8') if isinstance(source, bytes) else str(source) if source else "unknown"
+                        if isinstance(source, bytes):
+                            try:
+                                source_str = source.decode('utf-8')
+                            except UnicodeDecodeError:
+                                source_str = source.decode('latin-1')
+                        else:
+                            source_str = str(source) if source else "unknown"
                         by_llm_source[source_str] = {
                             "count": count,
                             "agreement_rate": round(agreements / count, 3) if count > 0 else 0.0
@@ -354,13 +360,27 @@ class ComparisonStorage:
 
                     records = []
                     for row in rows:
-                        # Handle potential bytes from SQLite
-                        image_filename = row[8]
-                        if isinstance(image_filename, bytes):
-                            image_filename = image_filename.decode('utf-8')
-                        llm_source = row[10]
-                        if isinstance(llm_source, bytes):
-                            llm_source = llm_source.decode('utf-8')
+                        # Helper to safely decode bytes from SQLite
+                        def safe_decode(val):
+                            if isinstance(val, bytes):
+                                try:
+                                    return val.decode('utf-8')
+                                except UnicodeDecodeError:
+                                    return val.decode('latin-1')
+                            return val
+
+                        # Handle potential bytes from SQLite for all text fields
+                        image_filename = safe_decode(row[8])
+                        llm_source = safe_decode(row[10])
+
+                        # Handle boolean fields that might come back as bytes
+                        human_verified_invalid = row[7]
+                        if isinstance(human_verified_invalid, bytes):
+                            human_verified_invalid = int.from_bytes(human_verified_invalid, 'little')
+
+                        agreement = row[9]
+                        if isinstance(agreement, bytes):
+                            agreement = int.from_bytes(agreement, 'little')
 
                         records.append({
                             "id": row[0],
@@ -370,9 +390,9 @@ class ComparisonStorage:
                             "template_percentage": row[4],
                             "template_confidence": row[5],
                             "human_verified_percentage": row[6],
-                            "human_verified_invalid": bool(row[7]) if row[7] is not None else False,
+                            "human_verified_invalid": bool(human_verified_invalid) if human_verified_invalid is not None else False,
                             "image_filename": image_filename,
-                            "agreement": bool(row[9]) if row[9] is not None else False,
+                            "agreement": bool(agreement) if agreement is not None else False,
                             "llm_source": llm_source
                         })
 
@@ -626,11 +646,17 @@ class ComparisonStorage:
                 """, (limit,)) as cursor:
                     async for row in cursor:
                         method, predicted, actual, count = row
-                        # Handle potential bytes from SQLite
+                        # Handle potential bytes from SQLite with fallback encoding
                         if isinstance(method, bytes):
-                            method = method.decode('utf-8')
+                            try:
+                                method = method.decode('utf-8')
+                            except UnicodeDecodeError:
+                                method = method.decode('latin-1')
                         if isinstance(actual, bytes):
-                            actual = actual.decode('utf-8')
+                            try:
+                                actual = actual.decode('utf-8')
+                            except UnicodeDecodeError:
+                                actual = actual.decode('latin-1')
                         patterns.append({
                             "method": method,
                             "predicted": predicted if predicted is not None else "invalid",
@@ -660,11 +686,17 @@ class ComparisonStorage:
                 """, (limit,)) as cursor:
                     async for row in cursor:
                         method, predicted, actual, count = row
-                        # Handle potential bytes from SQLite
+                        # Handle potential bytes from SQLite with fallback encoding
                         if isinstance(method, bytes):
-                            method = method.decode('utf-8')
+                            try:
+                                method = method.decode('utf-8')
+                            except UnicodeDecodeError:
+                                method = method.decode('latin-1')
                         if isinstance(actual, bytes):
-                            actual = actual.decode('utf-8')
+                            try:
+                                actual = actual.decode('utf-8')
+                            except UnicodeDecodeError:
+                                actual = actual.decode('latin-1')
                         patterns.append({
                             "method": method,
                             "predicted": predicted if predicted is not None else "invalid",
