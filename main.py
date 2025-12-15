@@ -1897,6 +1897,7 @@ async def delete_training_image(category: str, filename: str):
 async def verify_training_image(category: str, filename: str):
     """
     Mark a specific training image as verified.
+    Also updates the corresponding comparison record to confirm the classification was correct.
 
     Args:
         category: The category folder (0-100 or "invalid")
@@ -1932,6 +1933,20 @@ async def verify_training_image(category: str, filename: str):
             # Reload templates
             template_classifier._load_templates()
 
+            # Update comparison record to confirm this classification was correct
+            # Extract timestamp from filename and link to comparison record
+            timestamp = extract_timestamp_from_filename(filename)
+            if timestamp:
+                is_invalid = (category == "invalid")
+                human_percentage = None if is_invalid else int(category)
+                updated = await comparison_storage.update_verification_by_timestamp(
+                    timestamp=timestamp,
+                    human_percentage=human_percentage,
+                    is_invalid=is_invalid
+                )
+                if updated:
+                    logger.info(f"Verification linked to comparison record for {filename}")
+
             return {
                 "success": True,
                 "message": f"Marked {filename} as verified"
@@ -1947,6 +1962,7 @@ async def verify_training_image(category: str, filename: str):
 async def verify_all_images(categories: str = Form(...)):
     """
     Verify all visible images in specified categories (bulk action).
+    Also updates corresponding comparison records to confirm classifications were correct.
 
     Args:
         categories: JSON string with category list (e.g., '["50", "51"]')
@@ -1961,6 +1977,7 @@ async def verify_all_images(categories: str = Form(...)):
         training_dir = Path(template_classifier.training_data_dir)
         verified_count = 0
         failed_count = 0
+        comparison_linked_count = 0
 
         for category in category_list:
             # Validate category
@@ -1987,16 +2004,36 @@ async def verify_all_images(categories: str = Form(...)):
                     success = template_classifier.mark_verified(img_path)
                     if success:
                         verified_count += 1
+
+                        # Update comparison record to confirm this classification was correct
+                        timestamp = extract_timestamp_from_filename(img_path.name)
+                        if timestamp:
+                            is_invalid = (category == "invalid")
+                            human_percentage = None if is_invalid else int(category)
+                            updated = await comparison_storage.update_verification_by_timestamp(
+                                timestamp=timestamp,
+                                human_percentage=human_percentage,
+                                is_invalid=is_invalid
+                            )
+                            if updated:
+                                comparison_linked_count += 1
                     else:
                         failed_count += 1
 
         # Reload templates
         template_classifier._load_templates()
 
+        message = f"Verified {verified_count} images"
+        if comparison_linked_count > 0:
+            message += f" ({comparison_linked_count} linked to comparisons)"
+        if failed_count > 0:
+            message += f" ({failed_count} failed)"
+
         return {
             "success": True,
-            "message": f"Verified {verified_count} images" + (f" ({failed_count} failed)" if failed_count > 0 else ""),
+            "message": message,
             "verified_count": verified_count,
+            "comparison_linked_count": comparison_linked_count,
             "failed_count": failed_count
         }
 
