@@ -1813,9 +1813,6 @@ async def reclassify_training_image(
             final_path = verified_path
             logger.info(f"Auto-verified after reclassification: {verified_name}")
 
-        # Reload templates
-        template_classifier._load_templates()
-
         logger.info(f"Reclassified {filename}: {from_category} -> {to_category}")
 
         # Link ground truth to comparison record (if exists)
@@ -1880,7 +1877,6 @@ async def delete_training_image(category: str, filename: str):
             return {"success": False, "error": "Invalid path"}
 
         image_path.unlink()
-        template_classifier._load_templates()
 
         logger.info(f"Deleted training image: {category}/{filename}")
 
@@ -1930,9 +1926,6 @@ async def verify_training_image(category: str, filename: str):
         success = template_classifier.mark_verified(image_path)
 
         if success:
-            # Reload templates
-            template_classifier._load_templates()
-
             # Update comparison record to confirm this classification was correct
             # Extract timestamp from filename and link to comparison record
             timestamp = extract_timestamp_from_filename(filename)
@@ -2019,9 +2012,6 @@ async def verify_all_images(categories: str = Form(...)):
                                 comparison_linked_count += 1
                     else:
                         failed_count += 1
-
-        # Reload templates
-        template_classifier._load_templates()
 
         message = f"Verified {verified_count} images"
         if comparison_linked_count > 0:
