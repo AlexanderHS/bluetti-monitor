@@ -62,7 +62,7 @@ class DeviceDiscovery:
 
             for device in devices:
                 name = device.get("name", "")
-                online = device.get("online", True)  # Default to True for backward compatibility
+                online = device.get("is_online", True)
 
                 if "input" in name.lower():
                     if online:
