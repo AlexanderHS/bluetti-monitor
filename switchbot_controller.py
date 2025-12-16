@@ -46,11 +46,9 @@ class SwitchBotController:
         self.active_interval = int(os.getenv("ACTIVE_TAP_INTERVAL", 300))  # 5 minutes
         self.idle_interval = int(os.getenv("IDLE_TAP_INTERVAL", 1800))  # 30 minutes
 
-        # Daylight hours for solar activity (24-hour format with minute precision)
-        self.daylight_start_hour = int(os.getenv("DAYLIGHT_START_HOUR", 12))  # 12 noon
-        self.daylight_start_minute = int(os.getenv("DAYLIGHT_START_MINUTE", 0))  # :00
-        self.daylight_end_hour = int(os.getenv("DAYLIGHT_END_HOUR", 12))  # 12 noon
-        self.daylight_end_minute = int(os.getenv("DAYLIGHT_END_MINUTE", 1))  # :01
+        # Daylight hours for solar activity (24-hour format)
+        self.daylight_start_hour = int(os.getenv("DAYLIGHT_START_HOUR", 7))  # 7 AM
+        self.daylight_end_hour = int(os.getenv("DAYLIGHT_END_HOUR", 19))  # 7 PM
 
         # Log configuration at startup
         logger.debug(f"SwitchBot controller initialized:")
@@ -60,7 +58,7 @@ class SwitchBotController:
         logger.debug(f"  - Adaptive tap intervals:")
         logger.debug(f"    • Active (input ON OR output ON OR daylight): {self.active_interval}s ({self.active_interval/60:.1f} min)")
         logger.debug(f"    • Idle (all OFF + nighttime): {self.idle_interval}s ({self.idle_interval/60:.1f} min)")
-        logger.debug(f"    • Daylight hours: {self.daylight_start_hour}:{self.daylight_start_minute:02d} - {self.daylight_end_hour}:{self.daylight_end_minute:02d}")
+        logger.debug(f"    • Daylight hours: {self.daylight_start_hour}:00 - {self.daylight_end_hour}:00")
 
     def _is_daylight_hours(self) -> bool:
         """
@@ -70,11 +68,8 @@ class SwitchBotController:
             bool: True if within daylight hours
         """
         from datetime import datetime
-        now = datetime.now()
-        current_minutes = now.hour * 60 + now.minute
-        start_minutes = self.daylight_start_hour * 60 + self.daylight_start_minute
-        end_minutes = self.daylight_end_hour * 60 + self.daylight_end_minute
-        return start_minutes <= current_minutes < end_minutes
+        current_hour = datetime.now().hour
+        return self.daylight_start_hour <= current_hour < self.daylight_end_hour
 
     def get_dynamic_tap_interval(self, input_on: bool = False, output_on: bool = False) -> int:
         """
