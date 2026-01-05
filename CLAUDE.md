@@ -63,6 +63,12 @@ The system uses Tesseract OCR as the primary method for extracting battery perce
 - `GEMINI_API_KEY`: Optional - for LLM-based OCR comparison
 - `GROQ_API_KEY`: Optional - fallback LLM provider
 
+### Input Control Hysteresis
+Prevents input (charging) oscillation by using two thresholds:
+- `INPUT_LOW_THRESHOLD`: Inputs turn ON below this percentage (default: 20)
+- `INPUT_HIGH_THRESHOLD`: Inputs turn OFF above this percentage (default: 40)
+- Between thresholds: current input state is maintained
+
 ### Output Control Hysteresis
 Prevents output oscillation by using two thresholds instead of one:
 - `OUTPUT_HIGH_THRESHOLD`: Outputs turn ON above this percentage (default: 80)

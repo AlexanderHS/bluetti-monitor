@@ -11,7 +11,7 @@ A Python-based monitoring agent that periodically captures images from an ESP32 
 
 - **Periodic Image Capture**: Fetches images from ESP32 webcam at configurable intervals
 - **Tesseract OCR**: Extracts battery percentage from LCD screen images using Tesseract
-- **Hysteresis Control**: Prevents output oscillation with configurable high/low thresholds
+- **Hysteresis Control**: Prevents input/output oscillation with configurable high/low thresholds
 - **REST API**: FastAPI endpoints providing JSON data on battery status
 - **Docker Deployment**: Containerized for easy deployment and scaling
 - **Automated Device Control**: Controls power outlets via device control API based on battery level
@@ -107,6 +107,8 @@ Set environment variables in `.env` (see `.env.example` for full list):
 ### Key Settings
 - `CAPTURE_INTERVAL` - Seconds between captures (default: 30)
 - `API_PORT` - FastAPI server port (default: 8000)
+- `INPUT_LOW_THRESHOLD` - Battery % to turn inputs ON (default: 20)
+- `INPUT_HIGH_THRESHOLD` - Battery % to turn inputs OFF (default: 40)
 - `OUTPUT_HIGH_THRESHOLD` - Battery % to turn outputs ON (default: 80)
 - `OUTPUT_LOW_THRESHOLD` - Battery % to turn outputs OFF (default: 60)
 - `DEVICE_CONTROL_HOST` - Device control API host
