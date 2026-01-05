@@ -45,12 +45,39 @@ docker-compose logs -f
 
 ## Configuration
 
-Environment variables are configured in `.env`:
+Environment variables are configured in `.env` (see `.env.example` for full list):
+
+### Core Settings
 - `WEBCAM_URL`: ESP32 webcam base URL (required)
+- `WEBCAM_CAPTURE_ENDPOINT`: Capture endpoint path (default: `/capture`)
 - `CAPTURE_INTERVAL`: Seconds between image captures (default: 30)
 - `API_PORT`: FastAPI server port (default: 8000)
-- `OCR_CONFIDENCE_THRESHOLD`: Minimum OCR confidence (default: 0.8)
 - `LOG_LEVEL`: Logging verbosity (default: INFO)
+
+### OCR Strategy Settings
+The system uses Tesseract OCR as the primary method for extracting battery percentages from LCD screen images. Optional LLM-based OCR (Gemini/GROQ) can be enabled for comparison or fallback.
+
+- `ENABLE_TEMPLATE_STRATEGY`: Enable Tesseract-based OCR (default: true)
+- `ENABLE_GEMINI_STRATEGY`: Enable LLM OCR for comparison/fallback (default: true)
+- `PRIMARY_STRATEGY`: Which strategy drives device control - "template" or "llm" (default: llm)
+- `GEMINI_API_KEY`: Optional - for LLM-based OCR comparison
+- `GROQ_API_KEY`: Optional - fallback LLM provider
+
+### Output Control Hysteresis
+Prevents output oscillation by using two thresholds instead of one:
+- `OUTPUT_HIGH_THRESHOLD`: Outputs turn ON above this percentage (default: 80)
+- `OUTPUT_LOW_THRESHOLD`: Outputs turn OFF below this percentage (default: 60)
+- Between thresholds: current output state is maintained
+
+### Device Control
+- `DEVICE_CONTROL_HOST`: Device control API host (default: 10.0.0.109)
+- `DEVICE_CONTROL_PORT`: Device control API port (default: 8084)
+
+### SwitchBot Screen Control
+- `SWITCH_BOT_TOKEN`: SwitchBot API token (for screen wake taps)
+- `SWITCH_BOT_SECRET`: SwitchBot API secret
+- `ACTIVE_TAP_INTERVAL`: Screen tap interval during active monitoring (default: 300s)
+- `IDLE_TAP_INTERVAL`: Screen tap interval during idle/nighttime (default: 1800s)
 
 ## API Structure
 
