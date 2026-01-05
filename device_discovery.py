@@ -187,7 +187,7 @@ class DeviceDiscovery:
                 for device in devices:
                     name = device.get("name")
                     if name:
-                        states[name] = device.get("known_state", False)
+                        states[name] = device.get("is_on", False)
 
                 return states
             else:
