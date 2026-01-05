@@ -778,7 +778,7 @@ async def control_device(device_name: str, turn_on: bool, force: bool = False):
         logger.error(f"Error controlling device {device_name}: {e}")
         return False
 
-async def control_devices_based_on_battery(battery_percentage: int, force: bool = False):
+async def control_devices_based_on_battery(battery_percentage: int, force: bool = False, current_output_on: bool = None):
     """
     Control devices based on battery percentage using shared recommendation logic.
 
@@ -789,8 +789,10 @@ async def control_devices_based_on_battery(battery_percentage: int, force: bool 
     Args:
         battery_percentage: Current battery percentage
         force: Force device commands regardless of current state (used for startup calibration)
+        current_output_on: Current state of outputs (True=on, False=off, None=unknown)
+                          Used for hysteresis zone decisions
     """
-    result = calculate_device_recommendations(battery_percentage)
+    result = calculate_device_recommendations(battery_percentage, current_output_on)
     recommendations = result["recommendations"]
     reasoning = result["reasoning"]
 
@@ -1272,7 +1274,8 @@ async def background_worker():
                         force_devices = startup_sync_done != "true"
 
                         # Control devices based on the filtered percentage
-                        device_control_success = await control_devices_based_on_battery(filtered_percentage, force=force_devices)
+                        # Pass current output state for hysteresis logic
+                        device_control_success = await control_devices_based_on_battery(filtered_percentage, force=force_devices, current_output_on=output_on)
                         
                         # Mark startup sync as complete after first successful device control
                         if force_devices:
