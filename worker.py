@@ -835,7 +835,8 @@ async def control_devices_based_on_battery(
 
         recommendations = filtered_recommendations
     else:
-        logger.debug(f"Device control decision: {reasoning}")
+        logger.info(f"📋 Device control: {reasoning}")
+        logger.debug(f"  States passed: input_on={current_input_on}, output_on={current_output_on}")
 
     # Control each device based on (filtered) recommendations
     success_count = 0
