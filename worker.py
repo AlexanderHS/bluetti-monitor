@@ -835,8 +835,7 @@ async def control_devices_based_on_battery(
 
         recommendations = filtered_recommendations
     else:
-        logger.info(f"📋 Device control: {reasoning}")
-        logger.debug(f"  States passed: input_on={current_input_on}, output_on={current_output_on}")
+        logger.info(f"📋 Device control: {reasoning} [states: in={current_input_on}, out={current_output_on}]")
 
     # Control each device based on (filtered) recommendations
     success_count = 0
@@ -844,11 +843,9 @@ async def control_devices_based_on_battery(
 
     for device_name, action in recommendations.items():
         turn_on = action == "turn_on"
+        logger.info(f"  → Sending: {device_name} {'ON' if turn_on else 'OFF'} (force={force})")
 
-        # Always use force=True to ensure commands actually execute
-        # The home-automation API skips commands when force=False if it thinks device is already in desired state
-        # This can cause state desync, so we always force to ensure reliable control
-        if await control_device(device_name, turn_on, force=True):
+        if await control_device(device_name, turn_on, force=force):
             success_count += 1
         else:
             logger.error(f"Failed to control {device_name}")
@@ -945,6 +942,7 @@ async def background_worker():
             # Check if any inputs or outputs are on (pass states to avoid redundant API calls)
             input_on = device_discovery.is_any_input_on(device_states)
             output_on = device_discovery.is_any_output_on(device_states)
+            # Log device states when we have a valid reading (logged later with battery %)
             is_daylight = switchbot_controller._is_daylight_hours()
 
             # Determine current monitoring mode
