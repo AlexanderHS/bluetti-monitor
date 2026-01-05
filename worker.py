@@ -845,7 +845,10 @@ async def control_devices_based_on_battery(
     for device_name, action in recommendations.items():
         turn_on = action == "turn_on"
 
-        if await control_device(device_name, turn_on, force=force):
+        # Always use force=True to ensure commands actually execute
+        # The home-automation API skips commands when force=False if it thinks device is already in desired state
+        # This can cause state desync, so we always force to ensure reliable control
+        if await control_device(device_name, turn_on, force=True):
             success_count += 1
         else:
             logger.error(f"Failed to control {device_name}")
