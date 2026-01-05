@@ -67,6 +67,21 @@ The FastAPI application exposes:
 - **Docker**: Containerization
 - **Python 3.11+**: Runtime environment
 
+## Standard Deployment Workflow
+
+When making changes to this project, follow this workflow:
+
+1. **Make changes locally** (in the repo at the current working directory)
+2. **Syntax check**: `python -m py_compile <changed_files>` (optional but recommended)
+3. **Commit and push**: `git add . && git commit -m "message" && git push`
+4. **SSH to production**: `ssh ahs@10.0.0.109`
+5. **Pull changes**: `cd /home/ahs/bluetti-monitor && git pull`
+6. **Rebuild and restart**: `docker compose down && docker compose up -d --build`
+7. **Verify logs**: `docker compose logs -f` (wait ~30 seconds, check for errors)
+8. **Exit SSH**: `exit`
+
+Production server: `ssh ahs@10.0.0.109` at `/home/ahs/bluetti-monitor`
+
 ## Related Projects
 
 This is part of a home automation system alongside:
