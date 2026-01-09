@@ -1019,7 +1019,7 @@ async def background_worker():
                     if switchbot_controller.can_tap_screen(input_on=input_on, output_on=output_on):
                         logger.debug(f"Screen has been off for {consecutive_screen_off_count} cycles, attempting to tap it on")
 
-                        tap_result = await switchbot_controller.tap_screen()
+                        tap_result = await switchbot_controller.tap_screen(input_on=input_on, output_on=output_on)
                         if tap_result.get("success"):
                             # Reset failure counter on successful tap
                             consecutive_switchbot_failures = 0

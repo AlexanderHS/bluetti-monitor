@@ -137,16 +137,22 @@ class SwitchBotController:
         """
         return self.get_time_until_next_tap(input_on, output_on) == 0
 
-    async def tap_screen(self, force: bool = False) -> dict:
+    async def tap_screen(self, force: bool = False, input_on: bool = False, output_on: bool = False) -> dict:
         """
         Tap the screen using SwitchBot to turn it on
         Creates fresh SwitchBot object each time - no caching or state management
 
         Args:
             force: If True, bypass rate limiting (use with caution)
+            input_on: Current state of input devices (for rate limit calculation)
+            output_on: Current state of output devices (for rate limit calculation)
 
         Returns:
             Dictionary with success status and details
+
+        Note: Pass current device states to ensure rate limiting uses the correct interval.
+              When mode switches from IDLE to ACTIVE, the shorter ACTIVE interval is used
+              immediately, allowing a tap if it's been >5 min since last tap (not >30 min).
         """
         # Check basic configuration
         if not SWITCHBOT_AVAILABLE:
@@ -163,10 +169,10 @@ class SwitchBotController:
                 "details": "Set SWITCH_BOT_TOKEN and SWITCH_BOT_SECRET environment variables"
             }
 
-        # Check rate limiting (use default device states for rate limit check)
-        # Note: Worker should pass actual device states when calling can_tap_screen()
-        if not force and not self.can_tap_screen():
-            time_remaining = self.get_time_until_next_tap()
+        # Check rate limiting using current device states for accurate interval calculation
+        # This ensures mode switches (IDLE→ACTIVE) immediately use the new interval
+        if not force and not self.can_tap_screen(input_on=input_on, output_on=output_on):
+            time_remaining = self.get_time_until_next_tap(input_on=input_on, output_on=output_on)
             minutes_remaining = time_remaining / 60
             # Rate limiting is NOT a failure - it means our tap interval policy is working.
             # The 'rate_limited' flag distinguishes this from actual API/network failures.
