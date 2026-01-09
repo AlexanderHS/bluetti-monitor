@@ -680,7 +680,7 @@ def get_all_devices():
         list: List of device dictionaries with name and state information
               Returns empty list on error
     """
-    control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
+    control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.142")
     control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
     devices_url = f"http://{control_api_host}:{control_api_port}/devices"
 
@@ -746,7 +746,7 @@ async def control_device(device_name: str, turn_on: bool, force: bool = False):
         turn_on: True to turn on, False to turn off
         force: True to force the command regardless of current state
     """
-    control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
+    control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.142")
     control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
     control_url = f"http://{control_api_host}:{control_api_port}/device/control"
 
@@ -1044,30 +1044,39 @@ async def background_worker():
                                 logger.debug("Screen tap didn't turn screen on, will retry next cycle - SKIPPING OCR")
                                 should_skip_ocr = True
                         else:
-                            # SwitchBot tap failed - increment failure counter and log details
-                            consecutive_switchbot_failures += 1
-                            error_msg = tap_result.get('error', 'Unknown error')
-                            error_details = tap_result.get('details', '')
-                            error_code = tap_result.get('error_code', 0)
+                            # Check if this was rate limiting vs an actual failure
+                            # Rate limiting is NOT a failure - it means the tap interval policy is working correctly
+                            if tap_result.get('rate_limited'):
+                                # Rate limited - this is expected behavior, not a failure
+                                # Log at INFO level and skip OCR, but do NOT increment failure counter
+                                time_remaining = tap_result.get('time_until_next_tap_seconds', 0)
+                                logger.info(f"Screen tap skipped (rate limited) - {time_remaining/60:.1f} min until next tap allowed")
+                                should_skip_ocr = True
+                            else:
+                                # Actual SwitchBot failure - increment failure counter and log details
+                                consecutive_switchbot_failures += 1
+                                error_msg = tap_result.get('error', 'Unknown error')
+                                error_details = tap_result.get('details', '')
+                                error_code = tap_result.get('error_code', 0)
 
-                            # Build detailed error message
-                            full_error = f"{error_msg}"
-                            if error_details:
-                                full_error += f" - {error_details}"
-                            if error_code:
-                                full_error += f" (HTTP {error_code})"
+                                # Build detailed error message
+                                full_error = f"{error_msg}"
+                                if error_details:
+                                    full_error += f" - {error_details}"
+                                if error_code:
+                                    full_error += f" (HTTP {error_code})"
 
-                            logger.error(f"SwitchBot tap failed ({consecutive_switchbot_failures}/{max_switchbot_failures_before_bypass}): {full_error}")
+                                logger.error(f"SwitchBot tap failed ({consecutive_switchbot_failures}/{max_switchbot_failures_before_bypass}): {full_error}")
 
-                            # Log additional diagnostic info on first few failures
-                            if consecutive_switchbot_failures <= 2:
-                                logger.error(f"  Device states: input={'ON' if input_on else 'OFF'}, output={'ON' if output_on else 'OFF'}")
-                                logger.error(f"  Monitoring mode: {current_mode}")
+                                # Log additional diagnostic info on first few failures
+                                if consecutive_switchbot_failures <= 2:
+                                    logger.error(f"  Device states: input={'ON' if input_on else 'OFF'}, output={'ON' if output_on else 'OFF'}")
+                                    logger.error(f"  Monitoring mode: {current_mode}")
 
-                            if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
-                                logger.error(f"🚨 SwitchBot failure threshold reached - will bypass screen tapping on next cycle")
+                                if consecutive_switchbot_failures >= max_switchbot_failures_before_bypass:
+                                    logger.error(f"SwitchBot failure threshold reached - will bypass screen tapping on next cycle")
 
-                            should_skip_ocr = True
+                                should_skip_ocr = True
                     else:
                         # Rate limited - log and skip
                         time_until_next = switchbot_controller.get_time_until_next_tap(input_on=input_on, output_on=output_on)

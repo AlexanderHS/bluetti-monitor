@@ -168,8 +168,11 @@ class SwitchBotController:
         if not force and not self.can_tap_screen():
             time_remaining = self.get_time_until_next_tap()
             minutes_remaining = time_remaining / 60
+            # Rate limiting is NOT a failure - it means our tap interval policy is working.
+            # The 'rate_limited' flag distinguishes this from actual API/network failures.
             return {
                 "success": False,
+                "rate_limited": True,  # Distinguish from actual failures
                 "error": "Rate limited",
                 "details": f"Next tap allowed in {minutes_remaining:.1f} minutes",
                 "time_until_next_tap_seconds": time_remaining,
