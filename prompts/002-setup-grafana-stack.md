@@ -26,6 +26,11 @@ The user will later:
 1. SSH to the server and create directory structure:
    - /home/ahs/grafana/
    - /home/ahs/grafana/instance/ (for persistent data)
+   - /home/ahs/grafana/.gitignore with:
+     ```
+     instance/
+     .env
+     ```
 
 2. Create docker-compose.yml with:
    - Grafana latest stable (grafana/grafana:latest)

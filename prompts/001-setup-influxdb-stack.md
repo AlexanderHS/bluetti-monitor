@@ -20,6 +20,12 @@ The user will later:
 1. SSH to the server and create directory structure:
    - /home/ahs/influxdb/
    - /home/ahs/influxdb/instance/ (for persistent data)
+   - /home/ahs/influxdb/.gitignore with:
+     ```
+     instance/
+     .env
+     token.txt
+     ```
 
 2. Create docker-compose.yml with:
    - InfluxDB v2 (latest stable)
