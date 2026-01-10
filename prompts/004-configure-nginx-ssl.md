@@ -1,80 +1,78 @@
 <objective>
-Configure Nginx reverse proxy with SSL certificates for Grafana and InfluxDB on the production server.
+Configure DNS records, SSL certificates, and Nginx reverse proxy for Grafana and InfluxDB.
 
-This exposes the monitoring services over HTTPS using Let's Encrypt certificates via Cloudflare DNS validation.
+This exposes the monitoring services over HTTPS at graf.ad.2ho.me and flux.ad.2ho.me.
 </objective>
 
 <context>
-Server: ssh ahs@blu (10.0.0.142)
+Production server: ssh ahs@blu (10.0.0.142)
+DNS server (Samba AD/DC): ssh ahs@dc1
 Nginx config: /etc/nginx/sites-enabled/default
 
 Services to expose:
 - Grafana: http://localhost:3000 → https://graf.ad.2ho.me
 - InfluxDB: http://localhost:8086 → https://flux.ad.2ho.me
 
-SSL cert generation command:
-sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d "hostname.ad.2ho.me"
-
-IMPORTANT: The user will manually create DNS entries for graf.ad.2ho.me and flux.ad.2ho.me pointing to this server. Certbot with Cloudflare DNS validation will work regardless of DNS propagation for the A record.
+DNS zone: ad.2ho.me
+DNS add command: sudo samba-tool dns add localhost ad.2ho.me <name> A <ip> -P
 </context>
 
 <prerequisites>
 Before running this prompt:
-- Prompts 001 and 002 must be complete (InfluxDB and Grafana running)
-- User must have created DNS entries for graf.ad.2ho.me and flux.ad.2ho.me
+- Prompts 001 and 002 must be complete (InfluxDB and Grafana running on blu)
 </prerequisites>
 
 <requirements>
-1. Generate SSL certificates for both hostnames:
+1. Create DNS A records on dc1:
+   ```bash
+   ssh ahs@dc1 "sudo samba-tool dns add localhost ad.2ho.me graf A 10.0.0.142 -P"
+   ssh ahs@dc1 "sudo samba-tool dns add localhost ad.2ho.me flux A 10.0.0.142 -P"
    ```
-   sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d "graf.ad.2ho.me"
-   sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d "flux.ad.2ho.me"
+
+2. Verify DNS resolution:
+   ```bash
+   ssh ahs@dc1 "host graf.ad.2ho.me && host flux.ad.2ho.me"
    ```
 
-2. Add Nginx server blocks to /etc/nginx/sites-enabled/default following the existing pattern:
+3. Generate SSL certificates on blu (using Cloudflare DNS validation):
+   ```bash
+   ssh ahs@blu "sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d graf.ad.2ho.me"
+   ssh ahs@blu "sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d flux.ad.2ho.me"
+   ```
 
-   For Grafana (graf.ad.2ho.me → localhost:3000):
-   - HTTP server block redirecting to HTTPS
-   - HTTPS server block with:
-     - SSL certs from /etc/letsencrypt/live/graf.ad.2ho.me/
-     - proxy_pass to http://127.0.0.1:3000
-     - WebSocket support (required for Grafana live features)
-     - Standard proxy headers
+4. Add Nginx server blocks to /etc/nginx/sites-enabled/default on blu:
+   - Follow the existing pattern (HTTP redirect + HTTPS with proxy)
+   - graf.ad.2ho.me → localhost:3000 (Grafana)
+   - flux.ad.2ho.me → localhost:8086 (InfluxDB)
 
-   For InfluxDB (flux.ad.2ho.me → localhost:8086):
-   - HTTP server block redirecting to HTTPS
-   - HTTPS server block with:
-     - SSL certs from /etc/letsencrypt/live/flux.ad.2ho.me/
-     - proxy_pass to http://127.0.0.1:8086
-     - Standard proxy headers
+5. Test and reload Nginx:
+   ```bash
+   ssh ahs@blu "sudo nginx -t && sudo systemctl reload nginx"
+   ```
 
-3. Test Nginx configuration:
-   sudo nginx -t
-
-4. Reload Nginx:
-   sudo systemctl reload nginx
-
-5. Verify both services are accessible:
-   - curl -I https://graf.ad.2ho.me (should return 200 or 302 to login)
-   - curl -I https://flux.ad.2ho.me/health (should return 200)
+6. Verify HTTPS access:
+   ```bash
+   curl -I https://graf.ad.2ho.me
+   curl -I https://flux.ad.2ho.me/health
+   ```
 </requirements>
 
-<nginx_template>
-Follow this exact pattern from the existing config:
+<nginx_config>
+Append these server blocks to /etc/nginx/sites-enabled/default:
 
 ```nginx
 server {
     listen 80;
-    server_name HOSTNAME.ad.2ho.me;
+    server_name graf.ad.2ho.me;
     return 301 https://$server_name$request_uri;
 }
 
 server {
     listen 443 ssl http2;
-    server_name HOSTNAME.ad.2ho.me;
+    server_name graf.ad.2ho.me;
 
-    ssl_certificate /etc/letsencrypt/live/HOSTNAME.ad.2ho.me/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/HOSTNAME.ad.2ho.me/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/graf.ad.2ho.me/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/graf.ad.2ho.me/privkey.pem;
 
     # Modern SSL configuration
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -82,7 +80,44 @@ server {
     ssl_prefer_server_ciphers off;
 
     location / {
-        proxy_pass http://127.0.0.1:PORT;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support (required for Grafana Live)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # Increase timeouts for long-running requests
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+
+server {
+    listen 80;
+    server_name flux.ad.2ho.me;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name flux.ad.2ho.me;
+
+    ssl_certificate /etc/letsencrypt/live/flux.ad.2ho.me/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/flux.ad.2ho.me/privkey.pem;
+
+    # Modern SSL configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+
+    location / {
+        proxy_pass http://127.0.0.1:8086;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -93,45 +128,41 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
 
-        # Optional: Increase timeouts for long-running requests
+        # Increase timeouts for long-running requests
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
 }
 ```
-</nginx_template>
+</nginx_config>
 
 <implementation>
-Use SSH to execute all commands on the server.
+Execute commands via SSH to both servers:
+- dc1 for DNS record creation
+- blu for SSL certs and Nginx config
 
-For editing /etc/nginx/sites-enabled/default:
-- Use sudo to append the new server blocks
-- Or use a heredoc with sudo tee -a
+For appending Nginx config, use heredoc with sudo tee -a:
+```bash
+ssh ahs@blu "sudo tee -a /etc/nginx/sites-enabled/default << 'EOF'
+[nginx config here]
+EOF"
+```
 
-The certbot command requires sudo and will prompt for confirmation - use appropriate flags or expect interactive prompts.
+Certbot may require interactive confirmation - handle appropriately.
 </implementation>
-
-<output>
-On the server:
-- SSL certs generated for graf.ad.2ho.me and flux.ad.2ho.me
-- Nginx config updated with new server blocks
-- Nginx reloaded
-
-Verify with curl commands showing HTTPS access works.
-</output>
 
 <verification>
 Before declaring complete:
-1. sudo nginx -t returns "syntax is ok" and "test is successful"
-2. curl -I https://graf.ad.2ho.me returns HTTP response (200 or 302)
-3. curl -I https://flux.ad.2ho.me/health returns 200 with JSON
-4. Both services accessible in browser (user can verify manually)
+1. DNS resolves: `host graf.ad.2ho.me` and `host flux.ad.2ho.me` return 10.0.0.142
+2. Nginx config valid: `sudo nginx -t` returns success
+3. HTTPS works: `curl -I https://graf.ad.2ho.me` returns 200 or 302
+4. InfluxDB health: `curl https://flux.ad.2ho.me/health` returns JSON with status "pass"
 </verification>
 
 <success_criteria>
-- SSL certificates generated for both hostnames
-- Nginx configured and reloaded without errors
+- DNS A records created for graf.ad.2ho.me and flux.ad.2ho.me
+- SSL certificates generated via Let's Encrypt
+- Nginx configured with HTTPS reverse proxy
 - Both services accessible over HTTPS
-- WebSocket support enabled for Grafana
 </success_criteria>
