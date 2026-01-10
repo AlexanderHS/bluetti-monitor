@@ -18,7 +18,7 @@ class DeviceDiscovery:
     """Handles dynamic device discovery and time-based segmentation"""
 
     def __init__(self):
-        self.control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.109")
+        self.control_api_host = os.getenv("DEVICE_CONTROL_HOST", "10.0.0.142")
         self.control_api_port = os.getenv("DEVICE_CONTROL_PORT", "8084")
         self.devices_url = f"http://{self.control_api_host}:{self.control_api_port}/devices"
 

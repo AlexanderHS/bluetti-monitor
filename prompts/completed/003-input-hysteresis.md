@@ -14,7 +14,7 @@ With hysteresis:
 - Above INPUT_HIGH_THRESHOLD (e.g., 40%): Turn inputs OFF
 - Between thresholds: Maintain current input state
 
-Production server: `ssh ahs@10.0.0.109` at `/home/ahs/bluetti-monitor`
+Production server: `ssh ahs@10.0.0.142` at `/home/ahs/bluetti-monitor`
 </context>
 
 <requirements>

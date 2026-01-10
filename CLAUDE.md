@@ -76,7 +76,7 @@ Prevents output oscillation by using two thresholds instead of one:
 - Between thresholds: current output state is maintained
 
 ### Device Control
-- `DEVICE_CONTROL_HOST`: Device control API host (default: 10.0.0.109)
+- `DEVICE_CONTROL_HOST`: Device control API host (default: 10.0.0.142)
 - `DEVICE_CONTROL_PORT`: Device control API port (default: 8084)
 
 ### SwitchBot Screen Control
@@ -107,13 +107,25 @@ When making changes to this project, follow this workflow:
 1. **Make changes locally** (in the repo at the current working directory)
 2. **Syntax check**: `python -m py_compile <changed_files>` (optional but recommended)
 3. **Commit and push**: `git add . && git commit -m "message" && git push`
-4. **SSH to production**: `ssh ahs@10.0.0.109`
+4. **SSH to production**: `ssh ahs@blu`
 5. **Pull changes**: `cd /home/ahs/bluetti-monitor && git pull`
 6. **Rebuild and restart**: `docker compose down && docker compose up -d --build`
 7. **Verify logs**: `docker compose logs -f` (wait ~30 seconds, check for errors)
 8. **Exit SSH**: `exit`
 
-Production server: `ssh ahs@10.0.0.109` at `/home/ahs/bluetti-monitor`
+### Quick Commands (from local machine)
+```bash
+# Check status
+ssh ahs@blu "cd /home/ahs/bluetti-monitor && docker compose ps"
+
+# View recent logs
+ssh ahs@blu "cd /home/ahs/bluetti-monitor && docker compose logs --tail=50"
+
+# Full deploy (after push)
+ssh ahs@blu "cd /home/ahs/bluetti-monitor && git pull && docker compose down && docker compose up -d --build"
+```
+
+Production server: `ahs@blu` (hostname alias for 10.0.0.142) at `/home/ahs/bluetti-monitor`
 
 ## Related Projects
 
@@ -124,7 +136,7 @@ This is part of a home automation system alongside:
 ## Important Instructions for Claude Code
 
 When working with this repository:
-- **ALWAYS** commit and push changes to git after completing code modifications unless explicitly told not to
+- **ALWAYS** commit and push changes to git after completing any task that modifies files, unless explicitly told not to. This is the default behavior - do not ask for confirmation.
 - Prefer editing existing files over creating new ones
 - Do not create documentation files unless explicitly requested
 - Follow existing code patterns and conventions in the repository
