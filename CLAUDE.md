@@ -127,6 +127,46 @@ ssh ahs@blu "cd /home/ahs/bluetti-monitor && git pull && docker compose down && 
 
 Production server: `ahs@blu` (hostname alias for 10.0.0.142) at `/home/ahs/bluetti-monitor`
 
+## Querying Metrics Data
+
+Use the `query_metrics.sh` wrapper script to inspect InfluxDB data. This runs inside the Docker container via SSH, but the wrapper abstracts all complexity:
+
+```bash
+# Get last N battery readings (default 10)
+./query_metrics.sh readings --count 20
+
+# Get readings from last N hours
+./query_metrics.sh recent --hours 2
+
+# Get summary statistics
+./query_metrics.sh stats --hours 24
+
+# Check for anomalies (false readings, jumps, etc.)
+./query_metrics.sh anomalies --hours 24
+
+# Get camera/switchbot status history
+./query_metrics.sh status --hours 1
+
+# Help
+./query_metrics.sh --help
+```
+
+This is useful for:
+- Diagnosing OCR false readings (e.g., "70" misread as "7")
+- Checking camera/SwitchBot connectivity issues
+- Analyzing battery patterns over time
+
+## Monitoring Infrastructure
+
+- **InfluxDB**: https://flux.ad.2ho.me (time-series metrics storage)
+- **Grafana**: https://graf.ad.2ho.me (dashboards and alerting)
+
+Metrics written to InfluxDB:
+- `battery_reading`: battery_percentage, ocr_confidence, ocr_strategy
+- `camera_status`: reachable (0/1)
+- `switchbot_status`: reachable, rate_limited (0/1)
+- `device_state`: is_on (0/1), device_name, device_type
+
 ## Related Projects
 
 This is part of a home automation system alongside:

@@ -1,14 +1,24 @@
 <objective>
-Create a Python script on the production server that queries InfluxDB for battery readings and other metrics. This script will be used by future agents and humans to quickly inspect recent data, identify patterns, and diagnose issues like false OCR readings.
+Create a Python script that queries InfluxDB for battery readings and other metrics. This script will be used by future agents and humans to quickly inspect recent data, identify patterns, and diagnose issues like false OCR readings.
+
+The script runs inside the Docker container (not on the host) to avoid polluting the host environment.
 </objective>
 
 <context>
 Server: ssh ahs@blu
-Script location: /home/ahs/bluetti-monitor/query_metrics.py
-InfluxDB: http://localhost:8086 (or use INFLUXDB_URL from .env)
+Local repo: /Users/alexhamiltonsmith/repos/bluetti-monitor
+Script location in repo: ./query_metrics.py
+
+The script runs via docker exec:
+```bash
+ssh ahs@blu "docker exec bluetti-monitor-bluetti-monitor-worker-1 python query_metrics.py readings --count 10"
+```
+
+InfluxDB connection (from inside container):
+- URL: http://10.0.0.142:8086 (use INFLUXDB_URL from container's env)
 - Organization: home
 - Bucket: bluetti
-- Token: Read from INFLUXDB_TOKEN in /home/ahs/bluetti-monitor/.env
+- Token: From INFLUXDB_TOKEN env var (already configured in container)
 
 Measurements in InfluxDB:
 - `battery_reading`: fields `battery_percentage` (int), `ocr_confidence` (float), tag `ocr_strategy`
@@ -18,8 +28,8 @@ Measurements in InfluxDB:
 </context>
 
 <requirements>
-1. Create a Python script `/home/ahs/bluetti-monitor/query_metrics.py` that:
-   - Loads InfluxDB credentials from .env file (same directory)
+1. Create a Python script `./query_metrics.py` in the local repo that:
+   - Reads InfluxDB credentials from environment variables (already set in container)
    - Provides CLI commands for common queries
    - Outputs clean, readable results
 
@@ -55,7 +65,11 @@ Measurements in InfluxDB:
 <implementation>
 Use the influxdb-client library (already installed in requirements.txt).
 Use argparse for CLI argument parsing.
-Use python-dotenv to load .env file.
+Read credentials from environment variables (os.environ):
+- INFLUXDB_URL
+- INFLUXDB_TOKEN
+- INFLUXDB_ORG
+- INFLUXDB_BUCKET
 
 For anomaly detection, consider:
 - Battery jumps > 5% between consecutive readings
@@ -63,33 +77,48 @@ For anomaly detection, consider:
 - Single-digit readings that break a pattern (like 7 instead of 70)
 - Low confidence readings
 
-Make the script executable and include a shebang line.
+Include a shebang line: #!/usr/bin/env python3
 </implementation>
 
 <output>
 Create in local repo:
-- `./query_metrics.py` - The query script
+- `./query_metrics.py` - The Python script that queries InfluxDB (runs inside container)
+- `./query_metrics.sh` - Local wrapper script that SSHs and runs docker exec
+
+The wrapper script abstracts away all complexity. Future agents just run:
+```bash
+./query_metrics.sh readings --count 10
+./query_metrics.sh anomalies --hours 24
+```
 
 Then deploy to production:
 1. Commit and push to git
-2. SSH to server and pull: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && git pull"`
-3. Test the script on the server
+2. SSH to server, pull, and rebuild container:
+   ```bash
+   ssh ahs@blu "cd /home/ahs/bluetti-monitor && git pull && docker compose up -d --build"
+   ```
+3. Test locally using the wrapper script
 </output>
 
 <verification>
 Before declaring complete:
-1. Script exists locally and compiles: `python -m py_compile query_metrics.py`
-2. Changes committed and pushed to git
-3. Server has latest code: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && git pull"`
-4. Help works on server: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && python query_metrics.py --help"`
-5. Readings command works: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && python query_metrics.py readings --count 5"`
+1. Python script compiles: `python -m py_compile query_metrics.py`
+2. Shell wrapper is executable: `chmod +x query_metrics.sh`
+3. Changes committed and pushed to git
+4. Container rebuilt: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && git pull && docker compose up -d --build"`
+5. Wrapper script works locally:
+   ```bash
+   ./query_metrics.sh --help
+   ./query_metrics.sh readings --count 5
+   ```
 6. Show sample output from at least one command
 </verification>
 
 <success_criteria>
-- Script created in local repo and committed
-- Deployed to production server via git pull
-- All CLI commands work without errors on server
+- Python script created in repo (query_metrics.py)
+- Shell wrapper created in repo (query_metrics.sh)
+- Deployed to production via git pull + docker compose rebuild
+- Wrapper script works from local machine
 - Output is readable and includes relevant data
-- Can be used by future agents to quickly check metrics
+- Future agents can simply run `./query_metrics.sh [command] [args]`
 </success_criteria>

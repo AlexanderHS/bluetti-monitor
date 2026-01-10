@@ -9,25 +9,24 @@ This analysis will help identify:
 </objective>
 
 <context>
-Server: ssh ahs@blu
-Working directory: /home/ahs/bluetti-monitor
-Query script: python query_metrics.py (created by previous prompt)
+Local repo: /Users/alexhamiltonsmith/repos/bluetti-monitor
+Query script: ./query_metrics.sh (wrapper script created by previous prompt)
 
 The bluetti-monitor system uses OCR to read battery percentage from an LCD screen. The OCR can fail in various ways:
 - Missing digits (70 → 7)
 - Misread digits (8 → 0, 6 → 0, etc.)
 - Low confidence readings
 
-Related code files (in local repo /Users/alexhamiltonsmith/repos/bluetti-monitor):
+Related code files:
 - template_classifier.py - OCR implementation
 - worker.py - Main loop that stores readings
 </context>
 
 <analysis_requirements>
-1. Use the query script to get recent readings:
+1. Use the query wrapper script to get recent readings:
    ```bash
-   ssh ahs@blu "cd /home/ahs/bluetti-monitor && python query_metrics.py readings --count 50"
-   ssh ahs@blu "cd /home/ahs/bluetti-monitor && python query_metrics.py anomalies --hours 24"
+   ./query_metrics.sh readings --count 50
+   ./query_metrics.sh anomalies --hours 24
    ```
 
 2. Analyze the data for:
@@ -62,7 +61,7 @@ If code changes are recommended, describe them but don't implement yet - let the
 
 <verification>
 Before completing:
-- Confirm query script worked and returned data
+- Confirm ./query_metrics.sh worked and returned data
 - Ensure analysis is based on actual data, not assumptions
 - Recommendations should be specific and actionable
 </verification>
