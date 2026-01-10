@@ -40,6 +40,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Rate-of-change validation configuration
+# Based on battery specs: 2000Wh capacity, 2000W max output, 700W max input
+# Theoretical limits: drain=100%/h (at 2000W), charge=35%/h (at 700W solar)
+# Using defaults with multiplier to catch OCR errors like 71->7 (758%/h)
+MAX_DRAIN_RATE_PER_HOUR = float(os.getenv("MAX_DRAIN_RATE_PER_HOUR", "100"))
+MAX_CHARGE_RATE_PER_HOUR = float(os.getenv("MAX_CHARGE_RATE_PER_HOUR", "100"))
+RATE_VALIDATION_MULTIPLIER = float(os.getenv("RATE_VALIDATION_MULTIPLIER", "1.5"))
+MIN_TIME_FOR_RATE_CHECK_HOURS = 0.01  # 36 seconds - below this, use absolute change limit
+MAX_INSTANT_CHANGE = 10  # Max % change allowed in very short intervals
+
 # Database management (same as main.py)
 class BatteryDatabase:
     def __init__(self, db_path: str):
@@ -205,6 +215,52 @@ class BatteryDatabase:
             """, (key,)) as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else None
+
+def validate_rate_of_change(
+    new_percentage: int,
+    last_percentage: int,
+    time_diff_seconds: float
+) -> Tuple[bool, str]:
+    """
+    Validate that battery percentage change is physically plausible.
+
+    This catches OCR errors like "71" being misread as "7" which would appear
+    as a 758%/hour drain rate - well beyond the theoretical maximum of 100%/hour.
+
+    Args:
+        new_percentage: The new battery reading to validate
+        last_percentage: The previous valid battery reading
+        time_diff_seconds: Time elapsed since last reading in seconds
+
+    Returns:
+        Tuple of (is_valid, reason_if_rejected)
+    """
+    time_diff_hours = time_diff_seconds / 3600
+    percentage_change = new_percentage - last_percentage
+    abs_change = abs(percentage_change)
+
+    # For very short intervals, just check absolute change
+    if time_diff_hours < MIN_TIME_FOR_RATE_CHECK_HOURS:
+        if abs_change > MAX_INSTANT_CHANGE:
+            return False, f"instant change too large: {last_percentage}% -> {new_percentage}% ({abs_change}% in {time_diff_seconds:.0f}s)"
+        return True, ""
+
+    # Calculate rate of change in %/hour
+    rate_per_hour = abs_change / time_diff_hours
+
+    # Determine if charging or draining
+    if percentage_change < 0:
+        # Draining (percentage decreased)
+        max_rate = MAX_DRAIN_RATE_PER_HOUR * RATE_VALIDATION_MULTIPLIER
+        if rate_per_hour > max_rate:
+            return False, f"implausible drain rate: {last_percentage}% -> {new_percentage}% in {time_diff_seconds/60:.1f}min ({rate_per_hour:.0f}%/h > {max_rate:.0f}%/h limit)"
+    else:
+        # Charging (percentage increased)
+        max_rate = MAX_CHARGE_RATE_PER_HOUR * RATE_VALIDATION_MULTIPLIER
+        if rate_per_hour > max_rate:
+            return False, f"implausible charge rate: {last_percentage}% -> {new_percentage}% in {time_diff_seconds/60:.1f}min ({rate_per_hour:.0f}%/h > {max_rate:.0f}%/h limit)"
+
+    return True, ""
 
 def get_crop_coordinates():
     """Get battery crop coordinates from environment"""
@@ -1254,20 +1310,34 @@ async def background_worker():
                         last_readings = await db.get_recent_readings(limit=1)
                         if last_readings:
                             last_reading = last_readings[0]
-                            time_diff_minutes = (datetime.now().timestamp() - last_reading["timestamp"]) / 60
+                            time_diff_seconds = datetime.now().timestamp() - last_reading["timestamp"]
+                            time_diff_minutes = time_diff_seconds / 60
                             percentage_diff = abs(primary_percentage - last_reading["battery_percentage"])
 
-                            # Plausibility checks
-                            if time_diff_minutes < 2 and percentage_diff > 8:
-                                if primary_confidence < 0.9:
-                                    should_store = False
-                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {primary_percentage}% in {time_diff_minutes:.1f}min (conf: {primary_confidence})"
-                            elif time_diff_minutes < 5 and percentage_diff > 15:
-                                if primary_confidence < 0.85:
-                                    should_store = False
-                                    plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {primary_percentage}% in {time_diff_minutes:.1f}min (conf: {primary_confidence})"
-                    except:
-                        pass
+                            # Rate-of-change validation (applies REGARDLESS of confidence)
+                            # This catches OCR digit drops like 71->7 (758%/h rate)
+                            rate_valid, rate_reason = validate_rate_of_change(
+                                primary_percentage,
+                                last_reading["battery_percentage"],
+                                time_diff_seconds
+                            )
+                            if not rate_valid:
+                                should_store = False
+                                plausibility_msg = rate_reason
+                                logger.warning(f"🚫 Rate validation rejected: {rate_reason}")
+
+                            # Legacy plausibility checks (only for lower confidence readings)
+                            if should_store:
+                                if time_diff_minutes < 2 and percentage_diff > 8:
+                                    if primary_confidence < 0.9:
+                                        should_store = False
+                                        plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {primary_percentage}% in {time_diff_minutes:.1f}min (conf: {primary_confidence})"
+                                elif time_diff_minutes < 5 and percentage_diff > 15:
+                                    if primary_confidence < 0.85:
+                                        should_store = False
+                                        plausibility_msg = f"implausible change rejected: {last_reading['battery_percentage']}% → {primary_percentage}% in {time_diff_minutes:.1f}min (conf: {primary_confidence})"
+                    except Exception as e:
+                        logger.debug(f"Plausibility check error (will store anyway): {e}")
 
                     if should_store:
                         # Determine OCR method for logging
