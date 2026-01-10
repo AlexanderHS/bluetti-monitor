@@ -58,6 +58,11 @@ The docker-compose.yml should be minimal and follow best practices:
 <output>
 All files created on the remote server via SSH.
 Display the generated credentials at the end for the user to save.
+
+IMPORTANT: Also save the token to /home/ahs/influxdb/token.txt so prompt 003 can read it:
+```bash
+grep DOCKER_INFLUXDB_INIT_ADMIN_TOKEN /home/ahs/influxdb/.env | cut -d= -f2 > /home/ahs/influxdb/token.txt
+```
 </output>
 
 <verification>

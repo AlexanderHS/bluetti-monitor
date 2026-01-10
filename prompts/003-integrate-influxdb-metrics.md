@@ -57,10 +57,23 @@ Key files to modify:
    - Include switchbot_rate_limited (bool) as separate metric when 429 occurs
    - This enables alerting when SwitchBot device is offline (battery dead, network down, etc.)
 
-8. After code changes:
+8. Configure InfluxDB credentials on production server:
+   Read the token from /home/ahs/influxdb/token.txt (created by prompt 001) and add to bluetti-monitor .env:
+   ```bash
+   ssh ahs@blu "cd /home/ahs/bluetti-monitor && TOKEN=\$(cat /home/ahs/influxdb/token.txt) && cat >> .env << EOF
+
+# InfluxDB metrics (added by prompt 003)
+INFLUXDB_URL=http://localhost:8086
+INFLUXDB_TOKEN=\$TOKEN
+INFLUXDB_ORG=home
+INFLUXDB_BUCKET=bluetti
+EOF"
+   ```
+
+9. After code changes:
    - Commit and push to git
    - Deploy to production (pull, rebuild, restart)
-   - Verify logs show InfluxDB writes (if configured) or graceful skip (if not)
+   - Verify logs show InfluxDB writes working
 </requirements>
 
 <implementation>
