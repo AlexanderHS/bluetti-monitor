@@ -67,23 +67,29 @@ Make the script executable and include a shebang line.
 </implementation>
 
 <output>
-Create on server via SSH:
-- `/home/ahs/bluetti-monitor/query_metrics.py` - The query script
+Create in local repo:
+- `./query_metrics.py` - The query script
 
-Test the script works by running a few commands and showing output.
+Then deploy to production:
+1. Commit and push to git
+2. SSH to server and pull: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && git pull"`
+3. Test the script on the server
 </output>
 
 <verification>
 Before declaring complete:
-1. Script exists and is executable: `ls -la /home/ahs/bluetti-monitor/query_metrics.py`
-2. Help works: `python query_metrics.py --help`
-3. Readings command works: `python query_metrics.py readings --count 5`
-4. Show sample output from at least one command
+1. Script exists locally and compiles: `python -m py_compile query_metrics.py`
+2. Changes committed and pushed to git
+3. Server has latest code: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && git pull"`
+4. Help works on server: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && python query_metrics.py --help"`
+5. Readings command works: `ssh ahs@blu "cd /home/ahs/bluetti-monitor && python query_metrics.py readings --count 5"`
+6. Show sample output from at least one command
 </verification>
 
 <success_criteria>
-- Script created on production server
-- All CLI commands work without errors
+- Script created in local repo and committed
+- Deployed to production server via git pull
+- All CLI commands work without errors on server
 - Output is readable and includes relevant data
 - Can be used by future agents to quickly check metrics
 </success_criteria>
