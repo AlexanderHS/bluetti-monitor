@@ -11,6 +11,20 @@ import logging
 import asyncio
 from typing import Optional
 
+# Import InfluxDB writer (lazy import to avoid circular dependencies)
+_influxdb_writer = None
+
+def _get_influxdb_writer():
+    """Lazy load InfluxDB writer to avoid circular imports"""
+    global _influxdb_writer
+    if _influxdb_writer is None:
+        try:
+            from influxdb_writer import influxdb_writer
+            _influxdb_writer = influxdb_writer
+        except ImportError:
+            pass
+    return _influxdb_writer
+
 # Configure logging with ISO 8601 timestamps if not already configured
 if not logging.root.handlers:
     logging.basicConfig(
@@ -229,6 +243,11 @@ class SwitchBotController:
             next_tap_time = current_time + next_interval
             logger.debug(f"Screen tap completed - next tap allowed at {time.strftime('%H:%M:%S', time.localtime(next_tap_time))} ({next_interval/60:.1f} min)")
 
+            # Write SwitchBot success metrics to InfluxDB
+            writer = _get_influxdb_writer()
+            if writer:
+                writer.write_switchbot_status(reachable=True, rate_limited=False)
+
             return {
                 "success": True,
                 "message": "Screen tapped successfully",
@@ -240,17 +259,27 @@ class SwitchBotController:
 
         except Exception as e:
             logger.error(f"Failed to tap screen with SwitchBot: {e}")
-            
+
             error_code = self._parse_error_code(str(e))
-            
+
+            # Write SwitchBot failure/rate-limit metrics to InfluxDB
+            writer = _get_influxdb_writer()
+            if writer:
+                if error_code == 429:
+                    # Rate limiting is NOT a failure - SwitchBot is reachable but throttling us
+                    writer.write_switchbot_status(reachable=True, rate_limited=True)
+                else:
+                    # Actual failure - SwitchBot API unreachable
+                    writer.write_switchbot_status(reachable=False, rate_limited=False)
+
             # Handle rate limiting by extending the cooldown
             if error_code == 429:
                 logger.warning("⏳ 429 Rate limit detected - implementing 5 minute cooldown")
                 self.last_tap_time = time.time() + (5 * 60)  # Add 5 minutes
-            
+
             return {
-                "success": False, 
-                "error": "Tap failed", 
+                "success": False,
+                "error": "Tap failed",
                 "details": str(e),
                 "error_code": error_code
             }

@@ -28,6 +28,7 @@ from device_discovery import device_discovery
 from recommendations import calculate_device_recommendations, analyze_recent_readings_for_recommendations
 from template_classifier import template_classifier, log_comparison
 from comparison_storage import comparison_storage
+from influxdb_writer import influxdb_writer
 
 load_dotenv()
 
@@ -218,18 +219,20 @@ def capture_image():
     """Helper function to capture image from webcam"""
     webcam_url = os.getenv("WEBCAM_URL")
     capture_endpoint = os.getenv("WEBCAM_CAPTURE_ENDPOINT", "/capture")
-    
+
     if not webcam_url:
+        influxdb_writer.write_camera_status(reachable=False)
         raise Exception("WEBCAM_URL not configured")
-    
+
     capture_url = urljoin(webcam_url, capture_endpoint)
-    
+
     # Retry logic for network issues
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = requests.get(capture_url, timeout=10)
             if response.status_code == 200:
+                influxdb_writer.write_camera_status(reachable=True)
                 return response.content
         except Exception as e:
             error_msg = str(e).lower()
@@ -238,11 +241,13 @@ def capture_image():
                     logger.debug(f"Recoverable network error on attempt {attempt + 1}: {e}")
                     time.sleep(1)
                     continue
-            
+
             if attempt == max_retries - 1:
+                influxdb_writer.write_camera_status(reachable=False)
                 raise e
             time.sleep(0.5)
-    
+
+    influxdb_writer.write_camera_status(reachable=False)
     raise Exception(f"Failed to capture after {max_retries} attempts")
 
 def analyze_screen_state(image_bytes):
@@ -769,6 +774,8 @@ async def control_device(device_name: str, turn_on: bool, force: bool = False):
 
         if response.status_code == 200:
             logger.debug(f"Successfully controlled device {device_name}: {'on' if turn_on else 'off'}")
+            # Write device state to InfluxDB on successful control
+            influxdb_writer.write_device_state(device_name=device_name, is_on=turn_on)
             return True
         else:
             logger.error(f"Failed to control device {device_name}: HTTP {response.status_code}")
@@ -1276,6 +1283,13 @@ async def background_worker():
                             total_attempts=total_attempts,
                             raw_vote_data=raw_vote_data
                         )
+                        # Write battery reading to InfluxDB
+                        influxdb_writer.write_battery_reading(
+                            battery_percentage=filtered_percentage,
+                            ocr_confidence=primary_confidence,
+                            ocr_strategy=primary_strategy
+                        )
+
                         # Compact logging - combine reading and voting details
                         vote_info = ""
                         if "vote_distribution" in primary_result and len(primary_result.get('vote_distribution', {})) > 1:

@@ -13,3 +13,4 @@ asyncio==3.4.3
 python-switchbot==2.3.1
 google-genai
 groq
+influxdb-client
