@@ -8,6 +8,19 @@ The validation should be time-aware: a 60% drop over 2 days is fine, but a 60% d
 Local repo: /Users/alexhamiltonsmith/repos/bluetti-monitor
 Query script: ./query_metrics.sh
 
+**Battery specifications (Bluetti):**
+- Capacity: ~2000 Wh
+- Max input: 700W solar (500W AC available but only used at critical levels)
+- Max output: 2000W
+
+**Theoretical maximum rates (physics limits):**
+- Max drain: 2000W ÷ 2000Wh = 100%/hour (at full 2000W load)
+- Max charge: 700W ÷ 2000Wh = 35%/hour (at max solar input)
+
+**The false reading for comparison:**
+- 71% → 7% in ~5 minutes = 758%/hour
+- This is 7.5x beyond the theoretical max drain rate - clearly impossible
+
 The problem: OCR sometimes drops digits (71 → 7), and these readings pass through because:
 - Template OCR always returns confidence = 1.0
 - Plausibility checks only trigger when confidence < 0.9
@@ -32,6 +45,14 @@ Calculate from the data:
 - Maximum observed charge rate (% per hour) during charging
 - Typical time between readings
 
+**Important:** When analyzing, filter out obvious false readings (like single-digit values that jump back up immediately). We want to find the max rate of *legitimate* readings, not include the errors we're trying to catch.
+
+We already know the theoretical limits from battery specs:
+- Max drain: 100%/hour (theoretical, at 2000W continuous)
+- Max charge: 35%/hour (theoretical, at 700W solar)
+
+The analysis should confirm actual rates are well below these limits, giving us confidence in setting thresholds.
+
 **Phase 2: Implement validation**
 
 Add rate-of-change validation in worker.py that:
@@ -44,10 +65,12 @@ Add rate-of-change validation in worker.py that:
 
 2. Compares against configurable limits:
    ```python
-   # From .env with sensible defaults based on analysis
-   MAX_DRAIN_RATE = float(os.getenv("MAX_DRAIN_RATE_PER_HOUR", "15"))  # %/hour
-   MAX_CHARGE_RATE = float(os.getenv("MAX_CHARGE_RATE_PER_HOUR", "20"))  # %/hour
-   RATE_MULTIPLIER = float(os.getenv("RATE_VALIDATION_MULTIPLIER", "1.5"))
+   # From .env - defaults based on battery specs (2000Wh, 2000W out, 700W in)
+   # Theoretical max: drain=100%/h, charge=35%/h
+   # Using theoretical limits with 1.5x multiplier as safe ceiling
+   MAX_DRAIN_RATE = float(os.getenv("MAX_DRAIN_RATE_PER_HOUR", "100"))  # %/hour (theoretical max at 2000W)
+   MAX_CHARGE_RATE = float(os.getenv("MAX_CHARGE_RATE_PER_HOUR", "35"))  # %/hour (theoretical max at 700W)
+   RATE_MULTIPLIER = float(os.getenv("RATE_VALIDATION_MULTIPLIER", "1.5"))  # Safety margin
    ```
 
 3. Rejects readings that exceed limits:
@@ -72,8 +95,12 @@ Add rate-of-change validation in worker.py that:
 Add to .env.example:
 ```
 # Rate-of-change validation (rejects implausible OCR errors)
-MAX_DRAIN_RATE_PER_HOUR=15
-MAX_CHARGE_RATE_PER_HOUR=20
+# Based on battery specs: 2000Wh capacity, 2000W max output, 700W max input
+# Theoretical limits: drain=100%/h, charge=35%/h
+# With 1.5x multiplier: drain limit=150%/h, charge limit=52.5%/h
+# The 71→7 false reading was 758%/h - well beyond any valid reading
+MAX_DRAIN_RATE_PER_HOUR=100
+MAX_CHARGE_RATE_PER_HOUR=35
 RATE_VALIDATION_MULTIPLIER=1.5
 ```
 </requirements>
