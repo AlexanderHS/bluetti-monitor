@@ -36,8 +36,8 @@ Before running this prompt:
 
 3. Generate SSL certificates on blu (using Cloudflare DNS validation):
    ```bash
-   ssh ahs@blu "sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d graf.ad.2ho.me"
-   ssh ahs@blu "sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d flux.ad.2ho.me"
+   ssh ahs@blu "sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d graf.ad.2ho.me --email alexhamiltonsmith@gmail.com --agree-tos --non-interactive"
+   ssh ahs@blu "sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d flux.ad.2ho.me --email alexhamiltonsmith@gmail.com --agree-tos --non-interactive"
    ```
 
 4. Add Nginx server blocks to /etc/nginx/sites-enabled/default on blu:
