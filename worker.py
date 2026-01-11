@@ -40,13 +40,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Rate-of-change validation configuration
-# Based on battery specs: 2000Wh capacity, 2000W max output, 700W max input
-# Theoretical limits: drain=100%/h (at 2000W), charge=35%/h (at 700W solar)
-# Using defaults with multiplier to catch OCR errors like 71->7 (758%/h)
-MAX_DRAIN_RATE_PER_HOUR = float(os.getenv("MAX_DRAIN_RATE_PER_HOUR", "100"))
-MAX_CHARGE_RATE_PER_HOUR = float(os.getenv("MAX_CHARGE_RATE_PER_HOUR", "100"))
-RATE_VALIDATION_MULTIPLIER = float(os.getenv("RATE_VALIDATION_MULTIPLIER", "1.5"))
+# Rate-of-change validation configuration (context-aware based on output state)
+# Two rate limits based on output state:
+# - Output ON: 150%/h (2000W discharge = 100%/h + margin)
+# - Output OFF: 55%/h (solar 35%/h or AC 25%/h + margin)
+# This catches OCR errors like 51->5 (92%/h) when output is off
+RATE_LIMIT_OUTPUT_ON = 150.0   # 2000W discharge = 100%/h, with 1.5x margin
+RATE_LIMIT_OUTPUT_OFF = 55.0  # Solar 700W = 35%/h, AC 500W = 25%/h, with margin
 MIN_TIME_FOR_RATE_CHECK_HOURS = 0.01  # 36 seconds - below this, use absolute change limit
 MAX_INSTANT_CHANGE = 10  # Max % change allowed in very short intervals
 
@@ -219,18 +219,24 @@ class BatteryDatabase:
 def validate_rate_of_change(
     new_percentage: int,
     last_percentage: int,
-    time_diff_seconds: float
+    time_diff_seconds: float,
+    output_on: bool = False
 ) -> Tuple[bool, str]:
     """
-    Validate that battery percentage change is physically plausible.
+    Context-aware validation based on output state.
 
-    This catches OCR errors like "71" being misread as "7" which would appear
-    as a 758%/hour drain rate - well beyond the theoretical maximum of 100%/hour.
+    Two rate limits:
+    - Output ON: 150%/h (2000W discharge possible)
+    - Output OFF: 55%/h (solar/AC charging only, ~35%/h max + margin)
+
+    This catches OCR errors like "51" being misread as "5" over 30 minutes,
+    which would be 92%/h - invalid when output is off (max 55%/h).
 
     Args:
         new_percentage: The new battery reading to validate
         last_percentage: The previous valid battery reading
         time_diff_seconds: Time elapsed since last reading in seconds
+        output_on: Whether any output devices are currently on
 
     Returns:
         Tuple of (is_valid, reason_if_rejected)
@@ -248,17 +254,15 @@ def validate_rate_of_change(
     # Calculate rate of change in %/hour
     rate_per_hour = abs_change / time_diff_hours
 
-    # Determine if charging or draining
-    if percentage_change < 0:
-        # Draining (percentage decreased)
-        max_rate = MAX_DRAIN_RATE_PER_HOUR * RATE_VALIDATION_MULTIPLIER
-        if rate_per_hour > max_rate:
-            return False, f"implausible drain rate: {last_percentage}% -> {new_percentage}% in {time_diff_seconds/60:.1f}min ({rate_per_hour:.0f}%/h > {max_rate:.0f}%/h limit)"
+    # Simple two-level rate limit based on output state
+    if output_on:
+        max_rate = RATE_LIMIT_OUTPUT_ON  # 150%/h - 2000W discharge = 100%/h, with 1.5x margin
     else:
-        # Charging (percentage increased)
-        max_rate = MAX_CHARGE_RATE_PER_HOUR * RATE_VALIDATION_MULTIPLIER
-        if rate_per_hour > max_rate:
-            return False, f"implausible charge rate: {last_percentage}% -> {new_percentage}% in {time_diff_seconds/60:.1f}min ({rate_per_hour:.0f}%/h > {max_rate:.0f}%/h limit)"
+        max_rate = RATE_LIMIT_OUTPUT_OFF  # 55%/h - Solar 35%/h + AC 25%/h max, with margin
+
+    if rate_per_hour > max_rate:
+        context = "output ON" if output_on else "output OFF"
+        return False, f"implausible rate ({context}): {last_percentage}% -> {new_percentage}% in {time_diff_seconds/60:.1f}min ({rate_per_hour:.0f}%/h > {max_rate:.0f}%/h limit)"
 
     return True, ""
 
@@ -1314,12 +1318,13 @@ async def background_worker():
                             time_diff_minutes = time_diff_seconds / 60
                             percentage_diff = abs(primary_percentage - last_reading["battery_percentage"])
 
-                            # Rate-of-change validation (applies REGARDLESS of confidence)
-                            # This catches OCR digit drops like 71->7 (758%/h rate)
+                            # Rate-of-change validation (context-aware based on output state)
+                            # This catches OCR digit drops like 51->5 (92%/h when output OFF)
                             rate_valid, rate_reason = validate_rate_of_change(
                                 primary_percentage,
                                 last_reading["battery_percentage"],
-                                time_diff_seconds
+                                time_diff_seconds,
+                                output_on=output_on  # Already available in scope from device state check
                             )
                             if not rate_valid:
                                 should_store = False
