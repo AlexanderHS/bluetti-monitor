@@ -980,7 +980,6 @@ async def background_worker():
     max_screen_off_before_tap = 2  # Tap after 2 consecutive "screen off" detections
     consecutive_switchbot_failures = 0
     max_switchbot_failures_before_bypass = 5  # Bypass screen tapping after 5 consecutive failures
-    max_failure_hours = float(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 0.25))  # Default 15 minutes
 
     # Track monitoring mode for change detection
     last_monitoring_mode = None  # "active" or "idle"
@@ -994,7 +993,7 @@ async def background_worker():
 
     # Log SwitchBot configuration details
     logger.debug(f"SwitchBot resilience configuration:")
-    logger.debug(f"  - Container suicide after: {max_failure_hours} hours of no successful taps")
+    logger.debug(f"  - Container suicide after: {switchbot_controller.failure_timeout_hours} hours of REAL failures (not idle skips)")
     logger.debug(f"  - Emergency bypass after: {max_switchbot_failures_before_bypass} consecutive failures")
     logger.debug(f"  - Fresh object creation: Every tap creates new SwitchBot API object")
 

@@ -52,7 +52,12 @@ class SwitchBotController:
         self.secret = os.getenv("SWITCH_BOT_SECRET")
         self.device_name = os.getenv("SWITCH_BOT_DEVICE_NAME")  # Optional device selector
         self.last_tap_time = 0  # Track last tap timestamp for rate limiting
-        self.last_successful_tap_time = 0  # Track last successful tap for suicide logic
+        self.last_successful_tap_time = 0  # Track last successful tap for metrics/debugging
+
+        # Failure state tracking for suicide logic
+        # None = healthy (no active failure), timestamp = when failure started
+        # Only REAL failures (network, API errors) set this - intentional skips do NOT
+        self.failure_since: Optional[float] = None
 
         # Adaptive tap intervals based on activity (in seconds)
         # Active: When input/output on OR daylight hours (rapid changes possible)
@@ -64,6 +69,10 @@ class SwitchBotController:
         self.daylight_start_hour = int(os.getenv("DAYLIGHT_START_HOUR", 7))  # 7 AM
         self.daylight_end_hour = int(os.getenv("DAYLIGHT_END_HOUR", 19))  # 7 PM
 
+        # Failure timeout for container suicide logic (must be > idle_interval)
+        # Default 1 hour - only triggers after prolonged REAL failures, not idle skips
+        self.failure_timeout_hours = float(os.getenv("SWITCHBOT_FAILURE_TIMEOUT_HOURS", 1.0))
+
         # Log configuration at startup
         logger.debug(f"SwitchBot controller initialized:")
         logger.debug(f"  - Token configured: {'✅' if self.token else '❌'}")
@@ -73,6 +82,7 @@ class SwitchBotController:
         logger.debug(f"    • Active (input ON OR output ON OR daylight): {self.active_interval}s ({self.active_interval/60:.1f} min)")
         logger.debug(f"    • Idle (all OFF + nighttime): {self.idle_interval}s ({self.idle_interval/60:.1f} min)")
         logger.debug(f"    • Daylight hours: {self.daylight_start_hour}:00 - {self.daylight_end_hour}:00")
+        logger.debug(f"  - Failure timeout: {self.failure_timeout_hours} hours (suicide only on real API failures)")
 
     def _is_daylight_hours(self) -> bool:
         """
@@ -232,11 +242,17 @@ class SwitchBotController:
             
             # Tap the device
             target_device.press()
-            
+
             # Record successful tap
             current_time = time.time()
             self.last_tap_time = current_time
             self.last_successful_tap_time = current_time
+
+            # Clear failure state - successful tap proves SwitchBot is working
+            if self.failure_since is not None:
+                failure_duration = (current_time - self.failure_since) / 60
+                logger.info(f"SwitchBot recovered after {failure_duration:.1f} minutes of failure state")
+            self.failure_since = None
 
             # Log next tap time (using default intervals for logging)
             next_interval = self.get_dynamic_tap_interval()
@@ -274,8 +290,15 @@ class SwitchBotController:
 
             # Handle rate limiting by extending the cooldown
             if error_code == 429:
-                logger.warning("⏳ 429 Rate limit detected - implementing 5 minute cooldown")
+                logger.warning("429 Rate limit detected - implementing 5 minute cooldown")
                 self.last_tap_time = time.time() + (5 * 60)  # Add 5 minutes
+                # 429 is NOT a real failure - API is reachable, just throttling us
+                # Do NOT set failure_since for this case
+            else:
+                # Real failure (network error, auth error, etc.) - start tracking failure state
+                if self.failure_since is None:
+                    self.failure_since = time.time()
+                    logger.warning(f"SwitchBot entered failure state - will trigger suicide after {self.failure_timeout_hours} hours if not recovered")
 
             return {
                 "success": False,
@@ -285,26 +308,53 @@ class SwitchBotController:
             }
     
     def check_suicide_condition(self) -> dict:
-        """Check if container should exit due to prolonged SwitchBot failures"""
-        max_failure_hours = float(os.getenv("SWITCHBOT_MAX_FAILURE_HOURS", 0.25))  # Default 15 minutes
-        max_failure_seconds = max_failure_hours * 3600
+        """
+        Check if container should exit due to prolonged SwitchBot failures.
+
+        Uses a state-machine approach:
+        - failure_since = None: Healthy state (no active failure)
+        - failure_since = timestamp: In failure state since that time
+
+        State transitions:
+        - Healthy -> Failure: On REAL API/network failure (not 429, not rate-limit skip)
+        - Failure -> Healthy: On successful tap
+        - Failure -> SUICIDE: When failure duration exceeds threshold
+
+        IMPORTANT: Intentional rate-limit skips (idle mode, cooldowns) do NOT
+        trigger or affect the failure state. They are neutral events.
+        """
+        failure_timeout_seconds = self.failure_timeout_hours * 3600
         current_time = time.time()
-        
-        # If we've never had a successful tap, use current time as baseline
-        baseline_time = self.last_successful_tap_time or current_time
-        time_since_last_success = current_time - baseline_time
-        
+
+        # If not in failure state, no suicide needed
+        if self.failure_since is None:
+            return {
+                "should_exit": False,
+                "in_failure_state": False,
+                "failure_duration_hours": 0.0,
+                "failure_timeout_hours": self.failure_timeout_hours,
+                "failure_since": None
+            }
+
+        # In failure state - check if timeout exceeded
+        failure_duration = current_time - self.failure_since
+        failure_duration_hours = failure_duration / 3600
+        should_exit = failure_duration >= failure_timeout_seconds
+
         result = {
-            "should_exit": time_since_last_success >= max_failure_seconds,
-            "time_since_last_success_hours": time_since_last_success / 3600,
-            "max_failure_hours": max_failure_hours,
-            "last_successful_tap_time": self.last_successful_tap_time,
-            "baseline_time": baseline_time
+            "should_exit": should_exit,
+            "in_failure_state": True,
+            "failure_duration_hours": failure_duration_hours,
+            "failure_timeout_hours": self.failure_timeout_hours,
+            "failure_since": self.failure_since
         }
-        
-        if result["should_exit"]:
-            logger.critical(f"💀 CONTAINER SUICIDE: No successful SwitchBot tap for {result['time_since_last_success_hours']:.1f} hours (limit: {max_failure_hours} hours)")
-        
+
+        if should_exit:
+            logger.critical(f"CONTAINER SUICIDE: SwitchBot in failure state for {failure_duration_hours:.2f} hours (limit: {self.failure_timeout_hours} hours)")
+            logger.critical("This indicates a REAL API/network failure, not idle mode rate limiting")
+        elif failure_duration_hours > 0.1:  # Only log if in failure for > 6 minutes
+            logger.warning(f"SwitchBot failure state: {failure_duration_hours:.2f}/{self.failure_timeout_hours} hours until suicide")
+
         return result
 
     async def get_status(self, input_on: bool = False, output_on: bool = False) -> dict:
@@ -334,6 +384,9 @@ class SwitchBotController:
             "is_active_mode": input_on or output_on or is_daylight,
             "last_tap_time": self.last_tap_time if self.last_tap_time > 0 else None,
             "last_successful_tap_time": self.last_successful_tap_time if self.last_successful_tap_time > 0 else None,
+            "in_failure_state": self.failure_since is not None,
+            "failure_since": self.failure_since,
+            "failure_timeout_hours": self.failure_timeout_hours,
         }
 
 
